@@ -156,20 +156,28 @@ app.post('/api/command', async (req, res) => {
     } else if (provider === 'gemini') {
       const geminiApiKey = apiKey || process.env.GEMINI_API_KEY;
       if (!geminiApiKey) {
+        console.error('No Gemini API key provided.');
         return res.status(400).json({ error: 'No Gemini API key provided.' });
       }
-      const genAI = new GoogleGenerativeAI(geminiApiKey);
-      const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
-      const result = await model.generateContent(formattedPrompt);
-      const response = await result.response;
-      const text = response.text();
-      return res.json({
-        output: text,
-        tokens_used: null, // Gemini SDK may not provide token usage
-        model_version: 'gemini-pro',
-        provider: 'gemini',
-        raw_response: response,
-      });
+      try {
+        const genAI = new GoogleGenerativeAI(geminiApiKey);
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+        const result = await model.generateContent(formattedPrompt);
+        console.log('Gemini raw result:', result);
+        const response = await result.response;
+        const text = response.text();
+        console.log('Gemini response text:', text);
+        return res.json({
+          output: text,
+          tokens_used: null,
+          model_version: 'gemini-2.0-flash',
+          provider: 'gemini',
+          raw_response: response,
+        });
+      } catch (err) {
+        console.error('Gemini error:', err);
+        return res.status(500).json({ error: err.message });
+      }
     } else {
       return res.status(400).json({ error: 'Unsupported provider' });
     }
@@ -246,14 +254,14 @@ app.post('/api/workflow', async (req, res) => {
         const geminiApiKey = apiKey || process.env.GEMINI_API_KEY;
         if (!geminiApiKey) throw new Error('No Gemini API key provided.');
         const genAI = new GoogleGenerativeAI(geminiApiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-pro' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
         const resultGemini = await model.generateContent(formattedPrompt);
         const response = await resultGemini.response;
         const text = response.text();
         result = {
           output: text,
           tokens_used: null,
-          model_version: 'gemini-pro',
+          model_version: 'gemini-2.0-flash',
           provider: 'gemini',
           command,
           raw_response: response,
@@ -464,7 +472,9 @@ app.post('/api/chat', upload.single('attachment'), async (req, res) => {
   }
 
   // Always define these before using or logging them!
-  let provider = 'openai';
+  // Use provider and apiKey from the request body if present
+  let provider = req.body.provider || 'openai';
+  let apiKey = req.body.apiKey || undefined;
   let command = 'chat';
   let prompt = message;
 
@@ -519,7 +529,7 @@ app.post('/api/chat', upload.single('attachment'), async (req, res) => {
     const result = await fetch('http://localhost:3001/api/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, provider, command }),
+      body: JSON.stringify({ prompt, provider, command, apiKey }),
     });
     const data = await result.json();
     res.json({ response: data.output });
@@ -641,3 +651,5 @@ app.post('/api/user/webhooks', express.json(), async (req, res) => {
   );
   res.json({ success: true });
 });
+
+export default app;

@@ -25,6 +25,8 @@ const HELP_LINKS: { [key: string]: string } = {
   'azure-openai': 'https://learn.microsoft.com/en-us/azure/ai-services/openai/how-to/create-resource?pivots=web-portal',
 };
 
+const initialTempKeys = (providers: Provider[]) => Object.fromEntries(providers.map(p => [p.id, p.apiKey || '']));
+
 export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, providers, onSetApiKey, onShowCommands }) => {
   const [githubConnected, setGithubConnected] = useState(false);
   const [googleConnected, setGoogleConnected] = useState(false);
@@ -33,6 +35,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
   const [n8nUrl, setN8nUrl] = useState('');
   const [n8nSecret, setN8nSecret] = useState('');
   const [webhookError, setWebhookError] = useState<string | null>(null);
+  const [tempKeys, setTempKeys] = useState<{ [id: string]: string }>(() => initialTempKeys(providers));
+  const [keyStatus, setKeyStatus] = useState<{ [id: string]: 'connected' | 'disconnected' | 'error' }>({});
+  const [keyError, setKeyError] = useState<{ [id: string]: string }>({});
 
   const fetchStatuses = () => {
     fetch('http://localhost:3001/api/github/status', { credentials: 'include' })
@@ -63,8 +68,10 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
           setWebhookError('Could not load webhook settings. Please sign in.');
         });
     }
+    setTempKeys(initialTempKeys(providers));
+    setKeyStatus(Object.fromEntries(providers.map(p => [p.id, p.apiKey ? p.status : 'disconnected'])));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [open, providers]);
 
   const handleGitHubConnect = () => {
     window.open('http://localhost:3001/auth/github', '_blank');
@@ -126,6 +133,33 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
       });
     setN8nUrl(url);
     setN8nSecret(secret);
+  };
+
+  // Simulate backend validation (replace with real API call if available)
+  const validateApiKey = async (providerId: string, apiKey: string) => {
+    if (!apiKey) return 'disconnected';
+    // TODO: Replace with real backend validation
+    if (apiKey.length < 10) return 'error';
+    return 'connected';
+  };
+
+  const handleSaveKey = async (providerId: string) => {
+    const apiKey = tempKeys[providerId];
+    const status = await validateApiKey(providerId, apiKey);
+    setKeyStatus(s => ({ ...s, [providerId]: status }));
+    if (status === 'connected') {
+      setKeyError(e => ({ ...e, [providerId]: '' }));
+      onSetApiKey(providerId, apiKey);
+    } else {
+      setKeyError(e => ({ ...e, [providerId]: 'Invalid API key.' }));
+    }
+  };
+
+  const handleDeleteKey = (providerId: string) => {
+    setTempKeys(k => ({ ...k, [providerId]: '' }));
+    setKeyStatus(s => ({ ...s, [providerId]: 'disconnected' }));
+    setKeyError(e => ({ ...e, [providerId]: '' }));
+    onSetApiKey(providerId, '');
   };
 
   if (!open) return null;
@@ -212,11 +246,36 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
       name: p.name,
       icon: React.createElement(iconMap[p.icon as keyof typeof iconMap] || Bot, { className: 'w-6 h-6 text-white' }),
       color: p.color,
-      status: p.status,
+      status: keyStatus[p.id] || 'disconnected',
       action: (
         <div className="flex flex-col gap-2 w-full">
-          <input type="password" className="w-full rounded border px-2 py-1 bg-white dark:bg-neutral-900 border-gray-300 dark:border-neutral-700" placeholder="API Key" value={p.apiKey || ''} onChange={e => onSetApiKey(p.id, e.target.value)} />
-          {HELP_LINKS[p.id] && <a href={HELP_LINKS[p.id]} target="_blank" rel="noopener noreferrer" className="text-blue-500 underline text-xs">How to get this?</a>}
+          <input
+            type="password"
+            className={`w-full rounded border px-2 py-1 bg-white dark:bg-neutral-900 border-gray-300 dark:border-neutral-700 ${keyError[p.id] ? 'border-red-500' : ''}`}
+            placeholder="API Key"
+            value={tempKeys[p.id] || ''}
+            onChange={e => setTempKeys(k => ({ ...k, [p.id]: e.target.value }))}
+          />
+          {HELP_LINKS[p.id] && (
+            <a href={HELP_LINKS[p.id]} target="_blank" rel="noopener noreferrer" className="text-blue-500 underline text-xs">How to get this?</a>
+          )}
+          {keyError[p.id] && <div className="text-red-500 text-xs">{keyError[p.id]}</div>}
+          <div className="flex space-x-2 mt-1">
+            <button
+              className="flex-1 bg-neutral-800 text-white px-4 py-2 rounded-lg hover:bg-neutral-900 transition-colors text-sm"
+              onClick={() => handleSaveKey(p.id)}
+              type="button"
+            >
+              Save
+            </button>
+            <button
+              className="flex-1 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors text-sm"
+              onClick={() => handleDeleteKey(p.id)}
+              type="button"
+            >
+              Delete
+            </button>
+          </div>
         </div>
       )
     })),

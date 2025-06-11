@@ -19,7 +19,7 @@ export const Header: React.FC<{ onSettings?: () => void; darkMode: boolean; setD
           <div className="flex items-center space-x-4">
             <div className="flex items-center space-x-2 text-sm text-gray-600 dark:text-gray-300">
               <Globe className="w-4 h-4" />
-              <span>Server: Connected</span>
+              <span>Server: Running</span>
               <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
             </div>
             <button
