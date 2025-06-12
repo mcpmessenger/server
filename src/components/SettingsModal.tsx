@@ -11,6 +11,14 @@ interface SettingsModalProps {
   onShowCommands: () => void;
 }
 
+interface Webhook {
+  id: number;
+  name: string;
+  url: string;
+  type: string;
+  secret?: string;
+}
+
 // Example help links for each provider
 const HELP_LINKS: { [key: string]: string } = {
   openai: 'https://platform.openai.com/account/api-keys',
@@ -36,8 +44,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
   const [n8nSecret, setN8nSecret] = useState('');
   const [webhookError, setWebhookError] = useState<string | null>(null);
   const [tempKeys, setTempKeys] = useState<{ [id: string]: string }>(() => initialTempKeys(providers));
-  const [keyStatus, setKeyStatus] = useState<{ [id: string]: 'connected' | 'disconnected' | 'error' }>({});
+  const [keyStatus, setKeyStatus] = useState<{ [id: string]: 'connected' | 'disconnected' | 'error' | 'checking' }>({});
   const [keyError, setKeyError] = useState<{ [id: string]: string }>({});
+  const [webhooks, setWebhooks] = useState<Webhook[]>([]);
+  const [newWebhook, setNewWebhook] = useState<{ name: string; url: string; type: string; secret?: string }>({ name: '', url: '', type: 'zapier', secret: '' });
+  const [addError, setAddError] = useState<string | null>(null);
+  const [zapierSaved, setZapierSaved] = useState(false);
+  const [zapierSaving, setZapierSaving] = useState(false);
 
   const fetchStatuses = () => {
     fetch('http://localhost:3001/api/github/status', { credentials: 'include' })
@@ -48,6 +61,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
       .then(res => res.json())
       .then(data => setGoogleConnected(!!data.connected))
       .catch(() => setGoogleConnected(false));
+  };
+
+  const fetchWebhooks = async () => {
+    try {
+      const res = await fetch('/api/user/webhooks', { credentials: 'include' });
+      const data = await res.json();
+      setWebhooks(data.webhooks || []);
+    } catch (err) {
+      setAddError('Failed to fetch webhooks.');
+    }
   };
 
   useEffect(() => {
@@ -67,6 +90,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
         .catch(err => {
           setWebhookError('Could not load webhook settings. Please sign in.');
         });
+      fetchWebhooks();
     }
     setTempKeys(initialTempKeys(providers));
     setKeyStatus(Object.fromEntries(providers.map(p => [p.id, p.apiKey ? p.status : 'disconnected'])));
@@ -90,29 +114,91 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
     fetchStatuses();
   };
 
-  const onSaveZapier = (url: string, secret: string) => {
+  const validateApiKey = async (providerId: string, apiKey: string) => {
+    if (!apiKey) return { status: 'disconnected', error: '' };
+    const res = await fetch('/api/validate/provider', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: providerId, apiKey })
+    });
+    const data = await res.json();
+    if (data.success) return { status: 'connected', error: '' };
+    return { status: 'error', error: data.error || 'Invalid API key.' };
+  };
+
+  const handleSaveKey = async (providerId: string) => {
+    const apiKey = tempKeys[providerId];
+    setKeyStatus(s => ({ ...s, [providerId]: 'checking' }));
+    const { status, error } = await validateApiKey(providerId, apiKey);
+    setKeyStatus(s => ({ ...s, [providerId]: status }));
+    setKeyError(e => ({ ...e, [providerId]: error }));
+    if (status === 'connected') {
+      onSetApiKey(providerId, apiKey);
+    }
+  };
+
+  const handleDeleteKey = (providerId: string) => {
+    setTempKeys(k => ({ ...k, [providerId]: '' }));
+    setKeyStatus(s => ({ ...s, [providerId]: 'disconnected' }));
+    setKeyError(e => ({ ...e, [providerId]: '' }));
+    onSetApiKey(providerId, '');
+  };
+
+  const onSaveZapier = async (url: string, secret: string) => {
+    setWebhookError(null);
+    setZapierSaving(true);
+    setZapierSaved(false);
+    const res = await fetch('/api/validate/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json();
+    if (!data.success) {
+      setWebhookError('Invalid Zapier webhook: ' + (data.error || 'Unknown error'));
+      setZapierSaving(false);
+      setZapierSaved(false);
+      return;
+    }
     fetch('/api/user/webhooks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
       body: JSON.stringify({
-        zapierUrl: url,
-        zapierSecret: secret,
-        n8nUrl,
-        n8nSecret
+        name: 'default',
+        url,
+        type: 'zapier',
+        secret
       })
     })
       .then(async res => {
         if (!res.ok) throw new Error(await res.text());
         setWebhookError(null);
+        setZapierSaved(true);
       })
       .catch(err => {
         setWebhookError('Failed to save Zapier settings.');
+        setZapierSaved(false);
+      })
+      .finally(() => {
+        setZapierSaving(false);
       });
     setZapierUrl(url);
     setZapierSecret(secret);
   };
-  const onSaveN8n = (url: string, secret: string) => {
+
+  const onSaveN8n = async (url: string, secret: string) => {
+    setWebhookError(null);
+    const res = await fetch('/api/validate/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url })
+    });
+    const data = await res.json();
+    if (!data.success) {
+      setWebhookError('Invalid n8n webhook: ' + (data.error || 'Unknown error'));
+      return;
+    }
     fetch('/api/user/webhooks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -135,53 +221,82 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
     setN8nSecret(secret);
   };
 
-  // Simulate backend validation (replace with real API call if available)
-  const validateApiKey = async (providerId: string, apiKey: string) => {
-    if (!apiKey) return 'disconnected';
-    // TODO: Replace with real backend validation
-    if (apiKey.length < 10) return 'error';
-    return 'connected';
-  };
-
-  const handleSaveKey = async (providerId: string) => {
-    const apiKey = tempKeys[providerId];
-    const status = await validateApiKey(providerId, apiKey);
-    setKeyStatus(s => ({ ...s, [providerId]: status }));
-    if (status === 'connected') {
-      setKeyError(e => ({ ...e, [providerId]: '' }));
-      onSetApiKey(providerId, apiKey);
-    } else {
-      setKeyError(e => ({ ...e, [providerId]: 'Invalid API key.' }));
+  const handleAddWebhook = async () => {
+    setAddError(null);
+    // Validate webhook before saving
+    const res = await fetch('/api/validate/webhook', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: newWebhook.url })
+    });
+    const data = await res.json();
+    if (!data.success) {
+      setAddError('Invalid webhook: ' + (data.error || 'Unknown error'));
+      return;
     }
+    // Save webhook
+    const saveRes = await fetch('/api/user/webhooks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify(newWebhook)
+    });
+    if (!saveRes.ok) {
+      setAddError('Failed to save webhook.');
+      return;
+    }
+    setNewWebhook({ name: '', url: '', type: 'zapier', secret: '' });
+    fetchWebhooks();
   };
 
-  const handleDeleteKey = (providerId: string) => {
-    setTempKeys(k => ({ ...k, [providerId]: '' }));
-    setKeyStatus(s => ({ ...s, [providerId]: 'disconnected' }));
-    setKeyError(e => ({ ...e, [providerId]: '' }));
-    onSetApiKey(providerId, '');
+  const handleDeleteWebhook = async (id: number) => {
+    await fetch(`/api/user/webhooks/${id}`, { method: 'DELETE', credentials: 'include' });
+    fetchWebhooks();
   };
 
   if (!open) return null;
   // Unified settings items: providers + integrations
+  const githubProvider = providers.find(p => p.id === 'github');
+  const githubStatus = githubProvider?.apiKey ? 'connected' : 'disconnected';
   const integrationItems = [
     {
       id: 'github',
       name: 'GitHub',
       icon: <Github className="w-6 h-6 text-white" />,
       color: 'from-gray-700 to-black',
-      status: githubConnected ? 'connected' : 'disconnected',
+      status: githubStatus,
       action: (
-        <div className="flex flex-col gap-2">
-          {githubConnected ? (
-            <div className="flex gap-2">
-              <button onClick={handleGitHubConnect} className="bg-neutral-800 text-white px-4 py-2 rounded-lg hover:bg-neutral-900">Reconnect</button>
-              <button onClick={handleGitHubDisconnect} className="bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700 text-xs">Disconnect</button>
-            </div>
-          ) : (
-            <button onClick={handleGitHubConnect} className="bg-neutral-800 text-white px-4 py-2 rounded-lg hover:bg-neutral-900">Connect</button>
+        <div className="flex flex-col gap-2 w-full">
+          <input
+            type="password"
+            className={`w-full rounded border px-2 py-1 bg-white dark:bg-neutral-900 border-gray-300 dark:border-neutral-700 ${keyError['github'] && keyError['github'] !== 'Provider not supported for validation.' ? 'border-red-500' : ''}`}
+            placeholder="GitHub Token"
+            value={tempKeys['github'] || ''}
+            onChange={e => setTempKeys(k => ({ ...k, ['github']: e.target.value }))}
+          />
+          <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline text-xs">How to get a GitHub token?</a>
+          {keyError['github'] && keyError['github'] !== 'Provider not supported for validation.' && (
+            <div className="text-red-500 text-xs">{keyError['github']}</div>
           )}
-          <a href="https://docs.github.com/en/developers/apps/building-oauth-apps/creating-an-oauth-app" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline text-xs">How to connect GitHub?</a>
+          {githubProvider?.apiKey && (
+            <div className="text-green-600 text-xs">Token saved. GitHub commands are ready to use.</div>
+          )}
+          <div className="flex space-x-2 mt-1">
+            <button
+              className="flex-1 bg-neutral-800 text-white px-4 py-2 rounded-lg hover:bg-neutral-900 transition-colors text-sm"
+              onClick={() => handleSaveKey('github')}
+              type="button"
+            >
+              Save
+            </button>
+            <button
+              className="flex-1 bg-red-600 text-white px-4 py-2 rounded-lg hover:bg-red-700 transition-colors text-sm"
+              onClick={() => handleDeleteKey('github')}
+              type="button"
+            >
+              Delete
+            </button>
+          </div>
         </div>
       )
     },
@@ -193,14 +308,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
       status: googleConnected ? 'connected' : 'disconnected',
       action: (
         <div className="flex flex-col gap-2">
-          {googleConnected ? (
-            <div className="flex gap-2">
-              <button onClick={handleGoogleConnect} className="bg-neutral-800 text-white px-4 py-2 rounded-lg hover:bg-neutral-900">Reconnect</button>
-              <button onClick={handleGoogleDisconnect} className="bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700 text-xs">Disconnect</button>
-            </div>
-          ) : (
-            <button onClick={handleGoogleConnect} className="bg-neutral-800 text-white px-4 py-2 rounded-lg hover:bg-neutral-900">Connect</button>
-          )}
           <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline text-xs">How to connect Google?</a>
         </div>
       )
@@ -210,12 +317,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
       name: 'Zapier',
       icon: <Zap className="w-6 h-6 text-white" />,
       color: 'from-yellow-400 to-orange-500',
-      status: zapierUrl ? 'connected' : 'disconnected',
+      status: zapierSaving ? 'saving' : zapierSaved ? 'connected' : 'disconnected',
       action: (
         <div className="flex flex-col gap-2 w-full">
-          <input type="url" className="w-full rounded border px-2 py-1 bg-white dark:bg-neutral-900 border-gray-300 dark:border-neutral-700" placeholder="Zapier Webhook URL" value={zapierUrl || ''} onChange={e => setZapierUrl(e.target.value)} />
-          <input type="text" className="w-full rounded border px-2 py-1 bg-white dark:bg-neutral-900 border-gray-300 dark:border-neutral-700" placeholder="Zapier Secret (optional)" value={zapierSecret || ''} onChange={e => setZapierSecret(e.target.value)} />
-          <button className="px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 text-sm w-fit" onClick={() => onSaveZapier(zapierUrl, zapierSecret)} type="button">Save Zapier Settings</button>
+          <input type="url" className="w-full rounded border px-2 py-1 bg-white dark:bg-neutral-900 border-gray-300 dark:border-neutral-700" placeholder="Zapier Webhook URL" value={zapierUrl || ''} onChange={e => { setZapierUrl(e.target.value); setZapierSaved(false); }} />
+          <input type="text" className="w-full rounded border px-2 py-1 bg-white dark:bg-neutral-900 border-gray-300 dark:border-neutral-700" placeholder="Zapier Secret (optional)" value={zapierSecret || ''} onChange={e => { setZapierSecret(e.target.value); setZapierSaved(false); }} />
+          <button className="px-3 py-1 rounded bg-blue-600 text-white hover:bg-blue-700 text-sm w-fit" onClick={() => onSaveZapier(zapierUrl, zapierSecret)} type="button" disabled={zapierSaving}>{zapierSaving ? 'Saving...' : 'Save Zapier Settings'}</button>
           <a href="https://platform.zapier.com/docs/triggers/#webhooks" target="_blank" rel="noopener noreferrer" className="text-blue-500 underline text-xs">How to set up a Zapier webhook?</a>
         </div>
       )
@@ -238,10 +345,11 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
   ];
   // Map provider icon string to Lucide icon
   const iconMap = { Bot, Zap, Sparkles };
-  // Unified list: providers + integrations
+  // Only show OpenAI, Anthropic, and Gemini in the AI Providers section
+  const allowedAIProviders = ['openai', 'anthropic', 'gemini'];
   const unifiedItems = [
     { section: 'AI Providers' },
-    ...providers.map(p => ({
+    ...providers.filter(p => allowedAIProviders.includes(p.id)).map(p => ({
       id: p.id,
       name: p.name,
       icon: React.createElement(iconMap[p.icon as keyof typeof iconMap] || Bot, { className: 'w-6 h-6 text-white' }),

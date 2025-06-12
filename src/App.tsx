@@ -12,7 +12,8 @@ import { GitHubConnect } from './components/GitHubConnect';
 import { SmartChat } from './components/SmartChat';
 import { SettingsModal } from './components/SettingsModal';
 import { CommandList } from './components/CommandList';
-import { ChromeGrid } from '@/components/ui/chrome-grid';
+import { ChromeGrid } from './components/ui/chrome-grid';
+import { MessageCircle } from 'lucide-react';
 
 interface WorkflowStep {
   provider: string;
@@ -29,6 +30,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
   const [chatInput, setChatInput] = useState('');
+  const [chatMinimized, setChatMinimized] = useState(false);
 
   // Move dark mode state to be passed to Header
   const [darkMode, setDarkMode] = useState(() => {
@@ -145,21 +147,31 @@ function App() {
       {/* App content overlay - allow pointer events only on interactive children */}
       <div className="relative z-10 pointer-events-none">
         <div className="pointer-events-auto">
-          <Header onSettings={() => setShowSettings(true)} darkMode={darkMode} setDarkMode={setDarkMode} />
+          <Header onSettings={() => setShowSettings(true)} darkMode={darkMode} setDarkMode={setDarkMode} onMinimizeChat={() => setChatMinimized(true)} />
         </div>
         <main className="flex flex-col items-center w-full pointer-events-auto">
           <div className="w-full max-w-2xl">
-            <SmartChat providers={providers} inputValue={chatInput} setInputValue={setChatInput} inputPlaceholder="Type a message or try: 'Summarize this repo and create a GitHub issue: Login bug'" />
+            <SmartChat
+              providers={providers}
+              inputValue={chatInput}
+              setInputValue={setChatInput}
+              inputPlaceholder="Type a message or try: 'Summarize this repo and create a GitHub issue: Login bug'"
+              minimized={chatMinimized}
+              onRestore={() => setChatMinimized(false)}
+              darkMode={darkMode}
+            />
           </div>
-          <div className="w-full max-w-2xl mt-4 mb-2">
-            <div className="text-sm text-gray-500 dark:text-gray-300 flex items-center gap-2 p-2 bg-white/70 dark:bg-neutral-800 rounded-lg shadow">
-              <span>
-                <strong>Tip:</strong> Try multi-step commands like <code>Summarize this repo and create a GitHub issue: Login bug</code> or <code>List my GitHub repos and summarize the most active one</code>.<br />
-                You can also use single-step commands like <code>Summarize this document and translate to Spanish</code>.
-              </span>
-              <span title="MCP commands let you chain actions like summarizing, translating, or creating issues across providers." className="cursor-help text-blue-500">?</span>
+          {!chatMinimized && (
+            <div className="w-full max-w-2xl mt-4 mb-2">
+              <div className="text-sm text-gray-500 dark:text-gray-300 flex items-center gap-2 p-2 bg-white/70 dark:bg-neutral-800 rounded-lg shadow">
+                <span>
+                  <strong>Tip:</strong> Try multi-step commands like <code>Summarize this repo and create a GitHub issue: Login bug</code> or <code>List my GitHub repos and summarize the most active one</code>.<br />
+                  You can also use single-step commands like <code>Summarize this document and translate to Spanish</code>.
+                </span>
+                <span title="MCP commands let you chain actions like summarizing, translating, or creating issues across providers." className="cursor-help text-blue-500">?</span>
+              </div>
             </div>
-          </div>
+          )}
         </main>
         <div className="pointer-events-auto">
           <SettingsModal

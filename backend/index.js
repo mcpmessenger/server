@@ -13,6 +13,7 @@ import bodyParser from 'body-parser';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import { jwtDecode } from "jwt-decode";
+import githubProvider from './providers/github.js';
 
 dotenv.config();
 
@@ -60,6 +61,23 @@ const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const GITHUB_CALLBACK = 'http://localhost:3001/auth/github/callback';
 
+
+// --- Add this for MCP compatibility ---
+app.get('/api/commands', (req, res) => {
+  // You can customize this list as needed for your app/providers
+  res.json([
+    "chat",
+    "summarize",
+    "generate-code",
+    "explain",
+    "translate"
+  ]);
+});
+
+
+
+
+
 app.get('/auth/google', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
     access_type: 'offline',
@@ -94,7 +112,9 @@ function getGoogleAuthFromSession(req) {
 }
 
 app.post('/api/command', async (req, res) => {
+  console.log('Received /api/command:', req.body);
   const { prompt, provider, command, apiKey } = req.body;
+  console.log('Provider:', provider, 'Command:', command, 'API Key:', apiKey);
   let formattedPrompt = prompt;
 
   switch (command) {
@@ -122,9 +142,19 @@ app.post('/api/command', async (req, res) => {
         return res.status(400).json({ error: 'No OpenAI API key provided.' });
       }
       const openai = new OpenAI({ apiKey: openaiApiKey });
+
+      // --- TRIM THE MESSAGES ARRAY TO LAST 10 ---
+      let messagesToSend = req.body.messages;
+      if (!messagesToSend) {
+        messagesToSend = [{ role: 'user', content: formattedPrompt }];
+      }
+      if (Array.isArray(messagesToSend) && messagesToSend.length > 10) {
+        messagesToSend = messagesToSend.slice(-10);
+      }
+
       const completion = await openai.chat.completions.create({
         model: 'gpt-3.5-turbo',
-        messages: [{ role: 'user', content: formattedPrompt }],
+        messages: messagesToSend,
       });
       return res.json({
         output: completion.choices[0].message.content,
@@ -138,45 +168,83 @@ app.post('/api/command', async (req, res) => {
       if (!anthropicApiKey) {
         return res.status(400).json({ error: 'No Anthropic API key provided.' });
       }
-      const anthropic = new Anthropic({ apiKey: anthropicApiKey });
-      const completion = await anthropic.messages.create({
-        model: 'claude-3-sonnet-20240229',
-        max_tokens: 1024,
-        messages: [
-          { role: 'user', content: formattedPrompt }
-        ],
+      // Limit messages to last 10
+      let messages = Array.isArray(req.body.messages) ? req.body.messages.slice(-10) : [{ role: 'user', content: formattedPrompt }];
+      // Format messages for Claude 3 API
+      const claudeMessages = messages.map(m => ({
+        role: m.role,
+        content: m.content
+      }));
+      const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'x-api-key': anthropicApiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        },
+        body: JSON.stringify({
+          model: 'claude-3-opus-20240229',
+          max_tokens: 256,
+          messages: claudeMessages
+        })
       });
+      if (!anthropicRes.ok) {
+        const err = await anthropicRes.text();
+        return res.status(400).json({ error: 'Anthropic API error', details: err });
+      }
+      const data = await anthropicRes.json();
+      // Claude 3: content is an array of {type, text}
+      let reply = '';
+      if (data.content && Array.isArray(data.content)) {
+        reply = data.content.map(part => part.text).join(' ');
+      }
       return res.json({
-        output: completion.content[0].text,
-        tokens_used: completion.usage.input_tokens + completion.usage.output_tokens,
-        model_version: 'claude-3-sonnet-20240229',
-        provider: 'anthropic',
-        raw_response: completion,
+        output: reply || 'No response from Anthropic.',
+        raw: data
       });
-    } else if (provider === 'gemini') {
+    } else if (provider === 'gemini' || provider === 'google') {
       const geminiApiKey = apiKey || process.env.GEMINI_API_KEY;
       if (!geminiApiKey) {
-        console.error('No Gemini API key provided.');
-        return res.status(400).json({ error: 'No Gemini API key provided.' });
+        throw new Error('No Gemini API key provided');
       }
+      // --- TRIM THE MESSAGES ARRAY TO LAST 10 ---
+      let messages = req.body.messages || [{ role: 'user', content: formattedPrompt }];
+      if (Array.isArray(messages) && messages.length > 10) {
+        messages = messages.slice(-10);
+      }
+      const contents = Array.isArray(messages)
+        ? messages.map(m => ({ role: m.role, parts: [{ text: m.content }] }))
+        : [{ role: 'user', parts: [{ text: messages[messages.length - 1]?.content || '' }] }];
+      const geminiRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${geminiApiKey}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            contents,
+            generationConfig: { maxOutputTokens: 256 }
+          })
+        }
+      );
+      if (!geminiRes.ok) {
+        const err = await geminiRes.text();
+        throw new Error(`Gemini API error: ${err}`);
+      }
+      const data = await geminiRes.json();
+      return res.json({
+        output: data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response from Gemini.',
+        tokens_used: null,
+        model_version: 'gemini-2.0-flash',
+        provider: 'gemini',
+        raw_response: data,
+      });
+    } else if (provider === 'github') {
       try {
-        const genAI = new GoogleGenerativeAI(geminiApiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const result = await model.generateContent(formattedPrompt);
-        console.log('Gemini raw result:', result);
-        const response = await result.response;
-        const text = response.text();
-        console.log('Gemini response text:', text);
-        return res.json({
-          output: text,
-          tokens_used: null,
-          model_version: 'gemini-2.0-flash',
-          provider: 'gemini',
-          raw_response: response,
-        });
+        const result = await githubProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
+        return res.json({ success: true, ...result });
       } catch (err) {
-        console.error('Gemini error:', err);
-        return res.status(500).json({ error: err.message });
+        console.error('[MCP Server] GitHub error:', err.message);
+        return res.status(400).json({ success: false, error: err.message });
       }
     } else {
       return res.status(400).json({ error: 'Unsupported provider' });
@@ -406,20 +474,24 @@ app.post('/api/chat', upload.single('attachment'), async (req, res) => {
     fs.unlinkSync(req.file.path); // Clean up temp file
   }
 
-  // Debug: log the received message
-  console.log('Received chat message:', message);
-
-  // Zapier intent parsing (returns early if handled)
-  const zapierPattern = /^(\/?zapier\b|send (this|it)? to zapier|trigger zapier|zapier:)/i;
-  if (zapierPattern.test(message)) {
+  // Multi-webhook Zapier intent parsing
+  const zapierPattern = /^\s*\/zapier(?::([\w-]+))?/i;
+  const zapierMatch = message.match(zapierPattern);
+  if (zapierMatch) {
+    const hookName = zapierMatch[1];
     try {
-      let user = null;
-      if (req.session.userId) {
-        user = await db.get('SELECT zapierUrl, zapierSecret FROM User WHERE id = ?', req.session.userId);
-      } else {
-        user = await db.get('SELECT zapierUrl, zapierSecret FROM User LIMIT 1');
+      let userId = req.session.userId;
+      if (!userId) {
+        const user = await db.get('SELECT id FROM User LIMIT 1');
+        if (user) userId = user.id;
       }
-      if (!user || !user.zapierUrl) return res.json({ response: 'No Zapier webhook URL found. Please set it in settings.' });
+      let webhook = null;
+      if (hookName) {
+        webhook = await db.get('SELECT * FROM Webhook WHERE userId = ? AND name = ?', userId, hookName);
+      } else {
+        webhook = await db.get('SELECT * FROM Webhook WHERE userId = ? LIMIT 1', userId);
+      }
+      if (!webhook) return res.json({ response: 'No Zapier webhook found. Please add one in settings.' });
       let payloadText = message.replace(zapierPattern, '').trim();
       let payload;
       try {
@@ -427,8 +499,8 @@ app.post('/api/chat', upload.single('attachment'), async (req, res) => {
       } catch (e) {
         payload = { message: payloadText || message, history, attachmentContent };
       }
-      console.log('Sending to Zapier:', user.zapierUrl, payload);
-      const zapierResult = await sendToWebhook(user.zapierUrl, payload, user.zapierSecret);
+      console.log('Sending to Zapier:', webhook.url, payload);
+      const zapierResult = await sendToWebhook(webhook.url, payload, webhook.secret);
       if (zapierResult && !zapierResult.error) {
         return res.json({ response: '✅ Sent to Zapier webhook successfully!' });
       } else {
@@ -441,7 +513,7 @@ app.post('/api/chat', upload.single('attachment'), async (req, res) => {
   }
 
   // n8n intent parsing (returns early if handled)
-  const n8nPattern = /^(\/?n8n\b|send (this|it)? to n8n|trigger n8n|n8n:)/i;
+  const n8nPattern = /^\s*(\/n8n\b|send (this|it)? to n8n|trigger n8n|n8n:)/i;
   if (n8nPattern.test(message)) {
     try {
       let user = null;
@@ -510,15 +582,15 @@ app.post('/api/chat', upload.single('attachment'), async (req, res) => {
 
   try {
     if (provider === 'github' && command === 'list-repos') {
-      // Call your GitHub repos endpoint
-      const ghRes = await fetch('http://localhost:3001/api/github/repos', {
-        method: 'GET',
-        headers: { 'Cookie': req.headers.cookie || '' },
+      // Call the /api/command endpoint, which supports PATs
+      const result = await fetch('http://localhost:3001/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt, provider, command, apiKey }),
       });
-      const data = await ghRes.json();
-      if (data.repos) {
-        const repoList = data.repos.map(r => `- ${r.full_name}`).join('\n');
-        return res.json({ response: `Your GitHub repositories:\n${repoList}` });
+      const data = await result.json();
+      if (data.output) {
+        return res.json({ response: data.output });
       } else {
         console.error('Could not fetch GitHub repositories. Response:', data);
         return res.json({ response: 'Could not fetch GitHub repositories.' });
@@ -629,27 +701,105 @@ let db;
       zapierSecret TEXT,
       n8nUrl TEXT,
       n8nSecret TEXT
-    )
+    );
+    CREATE TABLE IF NOT EXISTS Webhook (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      userId INTEGER,
+      name TEXT,
+      url TEXT,
+      type TEXT,
+      secret TEXT
+    );
   `);
 })();
 
-export { db };
-
-// Get current user's webhook settings
+// List all webhooks for the user
 app.get('/api/user/webhooks', async (req, res) => {
-  const user = await db.get('SELECT zapierUrl, zapierSecret, n8nUrl, n8nSecret FROM User WHERE id = ?', req.session.userId);
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  res.json(user);
+  let userId = req.session.userId;
+  if (!userId) {
+    const user = await db.get('SELECT id FROM User LIMIT 1');
+    if (user) userId = user.id;
+  }
+  if (!userId) return res.status(404).json({ error: 'User not found' });
+  const webhooks = await db.all('SELECT * FROM Webhook WHERE userId = ?', userId);
+  res.json({ webhooks });
 });
 
-// Update current user's webhook settings
+// Add a new webhook
 app.post('/api/user/webhooks', express.json(), async (req, res) => {
-  const { zapierUrl, zapierSecret, n8nUrl, n8nSecret } = req.body;
-  await db.run(
-    'UPDATE User SET zapierUrl = ?, zapierSecret = ?, n8nUrl = ?, n8nSecret = ? WHERE id = ?',
-    zapierUrl, zapierSecret, n8nUrl, n8nSecret, req.session.userId
-  );
+  const { name, url, type, secret } = req.body;
+  let userId = req.session.userId;
+  if (!userId) {
+    let user = await db.get('SELECT id FROM User LIMIT 1');
+    if (!user) {
+      const result = await db.run('INSERT INTO User (githubId) VALUES (?)', 'dummy');
+      userId = result.lastID;
+    } else {
+      userId = user.id;
+    }
+  }
+  await db.run('INSERT INTO Webhook (userId, name, url, type, secret) VALUES (?, ?, ?, ?, ?)', userId, name, url, type, secret);
   res.json({ success: true });
 });
 
-export default app;
+// Delete a webhook
+app.delete('/api/user/webhooks/:id', async (req, res) => {
+  const { id } = req.params;
+  await db.run('DELETE FROM Webhook WHERE id = ?', id);
+  res.json({ success: true });
+});
+
+// Provider API key validation endpoint
+app.post('/api/validate/provider', express.json(), async (req, res) => {
+  const { provider, apiKey } = req.body;
+  try {
+    if (provider === 'openai') {
+      const OpenAI = (await import('openai')).default;
+      const openai = new OpenAI({ apiKey });
+      // Try a simple call
+      await openai.models.list();
+      return res.json({ success: true });
+    } else if (provider === 'anthropic') {
+      const { Anthropic } = await import('@anthropic-ai/sdk');
+      const anthropic = new Anthropic({ apiKey });
+      // Try a simple call
+      await anthropic.models.list();
+      return res.json({ success: true });
+    } else if (provider === 'gemini') {
+      const { GoogleGenerativeAI } = await import('@google/generative-ai');
+      const genAI = new GoogleGenerativeAI(apiKey);
+      // Try to list models
+      await genAI.listModels();
+      return res.json({ success: true });
+    } else {
+      return res.json({ success: false, error: 'Provider not supported for validation.' });
+    }
+  } catch (err) {
+    return res.json({ success: false, error: err.message });
+  }
+});
+
+// Webhook validation endpoint
+app.post('/api/validate/webhook', express.json(), async (req, res) => {
+  const { url } = req.body;
+  try {
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ test: true })
+    });
+    if (response.ok) {
+      return res.json({ success: true });
+    } else {
+      return res.json({ success: false, error: `Status ${response.status}` });
+    }
+  } catch (err) {
+    return res.json({ success: false, error: err.message });
+  }
+});
+
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok' });
+});
+

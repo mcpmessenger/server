@@ -1,59 +1,57 @@
-# MCP Hub – Technical Product Requirements Document (PRD)
+# MCP Server – Technical Product Requirements Document (PRD)
 
 ## 1. Vision
-A unified AI and automation command center for multi-provider chat, workflow chaining, and seamless integration with services like GitHub and Google, featuring a modern, responsive, and extensible UI.
+A unified backend service for the Model Context Protocol (MCP), enabling API-driven, multi-provider AI and automation command execution, workflow chaining, and seamless integration with services like GitHub and Google. MCP Server acts as the core engine for orchestrating commands and workflows across apps and protocols.
 
 ---
 
 ## 2. Tech Stack
 
-**Frontend:**
-- React 18 (TypeScript), Vite, Tailwind CSS (dark mode)
-- Custom UI components, lucide-react icons
-- 3D visuals via @react-three/fiber, three.js
-- State management with custom React hooks
-
 **Backend:**
 - Node.js (Express, ES modules)
 - AI Providers: OpenAI, Anthropic, Google Generative AI (Gemini)
-- Integrations: Google (OAuth), GitHub (OAuth, Octokit)
+- Integrations: Google (OAuth), GitHub (token-based)
 - Session management: express-session
 - Database: SQLite (per-user integration tokens)
 - Security: CORS, dotenv, multer
+
+**Frontend (Admin/Optional):**
+- React 18 (TypeScript), Vite, Tailwind CSS (dark mode)
+- Custom UI components, lucide-react icons
+- State management with custom React hooks
 
 ---
 
 ## 3. Core Features
 
-**Frontend**
-- Unified chat/workflow input (supports multi-step chaining)
-- Example commands and tips below chat input
-- Command palette and quick-insert for MCP commands
-- Per-user API key management (Google, GitHub, OpenAI, Anthropic, Gemini)
-- OAuth for Google and GitHub
-- Provider status indicators (connected/disconnected, last used, request count)
-- 3D ChromeGrid background
-- Settings modal for API key entry, provider connection, command reference
-- Request history
-
-**Backend**
-- API endpoints: `/api/chat`, `/api/workflow`, `/api/github`, `/api/google`
-- Session management and per-user integration tokens
-- Secure OAuth flows for Google and GitHub
+**API/Backend**
+- API endpoints: `/api/chat`, `/api/workflow`, `/api/github`, `/api/google`, `/api/health`
 - Modular provider/command registry for extensibility
 - Multi-step workflow execution and error handling
 - File upload and summarization
+- Smart intent parsing: routes commands to the correct provider or integration
+- Chained command parsing: users/apps can enter multi-step instructions in one message
+- Session management and per-user integration tokens
+- Secure OAuth flows for Google
+- Token-based authentication for GitHub
+- Real-time health check endpoint for server status
+
+**(Optional) Admin Frontend**
+- Settings modal for API key entry, provider connection, command reference
+- Request history and command palette
+- Provider status indicators (connected/disconnected, last used, request count)
+- Modern, responsive UI with dark/light mode
 
 ---
 
 ## 4. User Workflows
 
-- **Multi-provider AI chat:** Users can chat with OpenAI, Anthropic, or Gemini using their own API keys.
+- **Multi-provider AI chat:** Apps or users can send chat, summarize, or code commands to OpenAI, Anthropic, or Gemini using their own API keys.
 - **Command registry:** Supports chat, summarize, code search, repo summary, explain, translate, and more.
-- **Integrations:** Google Drive, Gmail, and GitHub via OAuth and per-user credentials.
+- **Integrations:** Google Drive, Gmail, and GitHub via OAuth or token-based credentials.
 - **Smart intent parsing:** Natural language commands are routed to the correct provider or integration.
-- **Chained commands:** Users can enter multi-step instructions in one message (e.g., "Summarize this PDF and translate to Spanish").
-- **Workflow builder:** (In progress) Visual builder for multi-step, multi-provider workflows.
+- **Chained commands:** Apps or users can enter multi-step instructions in one message (e.g., "Summarize this PDF and translate to Spanish").
+- **Workflow builder:** (Optional) Visual builder for multi-step, multi-provider workflows.
 - **File upload:** Summarize or process uploaded files.
 - **Session-based authentication:** Secure, per-user integration tokens.
 
@@ -62,7 +60,7 @@ A unified AI and automation command center for multi-provider chat, workflow cha
 ## 5. Security & Best Practices
 
 - TypeScript everywhere
-- Tailwind CSS for utility-first, responsive design
+- Tailwind CSS for utility-first, responsive design (frontend)
 - OAuth for secure integrations
 - Environment variables for secrets/config
 - API error handling and user feedback
@@ -73,7 +71,7 @@ A unified AI and automation command center for multi-provider chat, workflow cha
 
 ## 6. Roadmap & Next Steps
 
-- Visual workflow builder (drag-and-drop)
+- Visual workflow builder (drag-and-drop, optional)
 - More integrations (Notion, Slack, Jira, etc.)
 - Custom command macros and user-defined workflows
 - Scheduling and automation
@@ -91,25 +89,24 @@ A unified AI and automation command center for multi-provider chat, workflow cha
 
 ---
 
-# MCP Hub
+# MCP Server
 
 ## Product Requirements Document (PRD)
 
 **Core Features:**
-- Multi-provider AI chat (OpenAI, Anthropic, Gemini) with per-user API keys.
+- API-driven, multi-provider AI chat (OpenAI, Anthropic, Gemini) with per-user API keys.
 - Command registry: supports chat, summarize, code search, repo summary, explain, translate, and more.
-- Google Drive, Gmail, and GitHub integrations with OAuth and per-user credentials.
-- Real-time provider connection status in UI.
-- Command List modal for quick command discovery and insertion.
+- Google Drive, Gmail, and GitHub integrations with OAuth or token-based credentials.
+- Real-time provider connection status via API.
 - Smart intent parsing: routes commands to the correct provider or integration.
-- Chained command parsing: users can enter multi-step instructions in one message.
-- Workflow builder (in progress): design and run multi-step, multi-provider workflows.
+- Chained command parsing: apps or users can enter multi-step instructions in one message.
+- Workflow builder (optional): design and run multi-step, multi-provider workflows.
 - File upload and summarization.
 - Session-based authentication for integrations.
-- Modern, responsive UI with dark/light mode.
+- Modern, responsive (optional) UI for admin/configuration.
 
 **Advanced/Upcoming:**
-- Visual workflow builder (drag-and-drop).
+- Visual workflow builder (drag-and-drop, optional).
 - More integrations (Notion, Slack, Jira, etc).
 - Custom command macros and user-defined workflows.
 - Scheduling and automation.
@@ -119,21 +116,20 @@ A unified AI and automation command center for multi-provider chat, workflow cha
 
 ## Features
 
-- **Multi-provider AI chat:** OpenAI, Anthropic, Gemini (per-user API keys)
+- **API-driven multi-provider AI chat:** OpenAI, Anthropic, Gemini (per-user API keys)
 - **Command registry:** Chat, summarize, code search, repo summary, explain, translate, and more
-- **Integrations:** Google Drive, Gmail, GitHub (OAuth, per-user credentials)
-- **Command List modal:** Discover and insert commands quickly
+- **Integrations:** Google Drive, Gmail, GitHub (OAuth or token-based credentials)
 - **Smart intent parsing:** Natural language commands routed to the right provider/integration
 - **Chained commands:** Enter multi-step instructions in one message
-- **Workflow builder:** (in progress) Visual multi-step, multi-provider workflows
+- **Workflow builder:** (optional) Visual multi-step, multi-provider workflows
 - **File upload:** Summarize or process uploaded files
 - **Session-based authentication:** Secure, per-user integration tokens
-- **Modern UI:** Responsive, dark/light mode, real-time provider status
+- **Modern UI (optional):** Responsive, dark/light mode, real-time provider status
 
-## Chained Commands & GUI
+## Chained Commands & API
 
 ### Overview
-Chained commands allow users to combine multiple actions in a single workflow, where the output of one command becomes the input for the next. This enables complex, multi-step tasks to be performed with a single prompt or through a visual builder.
+Chained commands allow apps or users to combine multiple actions in a single workflow, where the output of one command becomes the input for the next. This enables complex, multi-step tasks to be performed with a single API call or through a visual builder.
 
 ### User Value
 - Automates repetitive or multi-step tasks.
@@ -151,13 +147,16 @@ Chained commands allow users to combine multiple actions in a single workflow, w
 - Extract Text → Analyze Sentiment
 
 ### Error Handling
-- If a step fails, the user is notified with a clear error message.
-- The user can view which step failed and retry or edit the chain.
+- If a step fails, the user/app is notified with a clear error message.
+- The user/app can view which step failed and retry or edit the chain.
 
-### Chained Command GUI
+### Chained Command API/GUI
 
 **Key Features:**
-- **Command Builder Modal/Panel:**
+- **API for Chained Commands:**
+  - Apps can POST a workflow (array of steps) to `/api/workflow`.
+  - Each step specifies provider, command, prompt, and (optionally) API key.
+- **(Optional) Command Builder Modal/Panel:**
   - Users can visually add, remove, and reorder steps in a workflow.
   - Each step is represented as a card or block with editable parameters.
 - **Inline Chaining in Chat:**
@@ -168,11 +167,11 @@ Chained commands allow users to combine multiple actions in a single workflow, w
   - Users can expand/collapse to view intermediate results.
 
 **User Flow:**
-1. User types a chained command or opens the builder.
+1. App or user sends a chained command or opens the builder.
 2. System parses and displays the steps.
-3. User reviews/edits the steps.
-4. User clicks "Run."
-5. UI shows progress and results for each step.
+3. User/app reviews/edits the steps.
+4. User/app clicks "Run."
+5. API/UI shows progress and results for each step.
 
 ---
 

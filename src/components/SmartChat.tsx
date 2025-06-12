@@ -1,4 +1,5 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
+import { MessageCircle } from 'lucide-react';
 
 interface ChatMessage {
   sender: 'user' | 'ai';
@@ -21,7 +22,11 @@ function parseChainedCommands(input: string): string[] {
     .filter(Boolean);
 }
 
-export const SmartChat: React.FC<SmartChatProps> = ({ inputValue, setInputValue, inputPlaceholder, providers }) => {
+function isGithubCommand(input: string): boolean {
+  return /github.*repo|repo.*github|list.*repo|show.*repo|my.*repo|repo[- ]?summary|code[- ]?search|issue|pull[- ]?request|pr/i.test(input);
+}
+
+export const SmartChat: React.FC<SmartChatProps & { minimized?: boolean; onRestore?: () => void; darkMode?: boolean }> = ({ inputValue, setInputValue, inputPlaceholder, providers, minimized, onRestore, darkMode }) => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [internalValue, setInternalValue] = useState('');
   const value = inputValue !== undefined ? inputValue : internalValue;
@@ -34,6 +39,10 @@ export const SmartChat: React.FC<SmartChatProps> = ({ inputValue, setInputValue,
   // Command history state
   const [commandHistory, setCommandHistory] = useState<string[]>([]);
   const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+
+  // Only show OpenAI, Anthropic, and Gemini in the provider dropdown
+  const allowedAIProviders = ['openai', 'anthropic', 'gemini'];
+  const aiProviders = (providers || []).filter(p => allowedAIProviders.includes(p.id));
 
   const handleSend = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
@@ -56,49 +65,22 @@ export const SmartChat: React.FC<SmartChatProps> = ({ inputValue, setInputValue,
     setMessages((prev) => [...prev, userMsg]);
     setInternalValue('');
     setAttachment(null);
-    // Add to command history if not duplicate of last
     setCommandHistory(prev => (prev.length === 0 || prev[prev.length - 1] !== value) ? [...prev, value] : prev);
     setHistoryIndex(null);
 
-    // Find selected provider object
-    const providerObj = providers?.find(p => p.id === selectedProvider);
-    const apiKey = providerObj?.apiKey || '';
-
-    // Chained command parsing
-    const steps = parseChainedCommands(value);
-    if (steps.length > 1) {
-      // Build workflow steps (all use selected provider)
-      const workflow = steps.map((step, idx) => ({
-        provider: selectedProvider,
-        command: 'chat',
-        prompt: idx === 0 && attachmentContent ? step + '\n\nAttached file:\n' + attachmentContent : step,
-        apiKey
-      }));
-      const res = await fetch('http://localhost:3001/api/workflow', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workflow }),
-        credentials: 'include',
-      });
-      const data = await res.json();
-      if (data.results && Array.isArray(data.results)) {
-        setMessages((prev) => [
-          ...prev,
-          ...data.results.map((r: any) => ({ sender: 'ai', text: r.output || r.error || '[No output]' }))
-        ]);
-      } else {
-        setMessages((prev) => [...prev, { sender: 'ai', text: '[Workflow error]' }]);
-      }
-      setLoading(false);
-      return;
-    }
     // Single command: send provider and apiKey
     const formData = new FormData();
     formData.append('message', value);
     if (attachment) formData.append('attachment', attachment);
     formData.append('history', JSON.stringify(messages));
-    formData.append('provider', selectedProvider);
-    formData.append('apiKey', apiKey);
+    let providerToSend = selectedProvider;
+    let apiKeyToSend = aiProviders.find(p => p.id === selectedProvider)?.apiKey || '';
+    if (isGithubCommand(value)) {
+      providerToSend = 'github';
+      apiKeyToSend = providers?.find(p => p.id === 'github')?.apiKey || '';
+    }
+    formData.append('provider', providerToSend);
+    formData.append('apiKey', apiKeyToSend);
     const res = await fetch('http://localhost:3001/api/chat', {
       method: 'POST',
       body: formData,
@@ -151,37 +133,57 @@ export const SmartChat: React.FC<SmartChatProps> = ({ inputValue, setInputValue,
     }
   };
 
+  if (minimized) {
+    return (
+      <button
+        className="fixed bottom-6 right-6 z-50 bg-blue-600 hover:bg-blue-700 text-white rounded-full shadow-lg p-4 flex items-center justify-center"
+        onClick={onRestore}
+        aria-label="Restore chat"
+      >
+        <MessageCircle className="w-7 h-7" />
+      </button>
+    );
+  }
+
   return (
-    <div className="max-w-2xl mx-auto mt-10 bg-white/80 dark:bg-neutral-900 dark:border-neutral-700 rounded-xl p-6 border border-gray-200 shadow-lg">
+    <div className={`max-w-2xl mx-auto mt-10 rounded-xl p-6 border shadow-lg transition-colors duration-300
+      ${darkMode ? 'bg-neutral-900 border-neutral-700 text-white' : 'bg-white border-gray-200 text-gray-900'}`}
+    >
       <h2 className="text-2xl font-bold mb-4 text-center">MCP Smart Chat</h2>
       {/* Provider Dropdown */}
       {providers && providers.filter(p => p.status === 'connected').length > 0 && (
         <div className="mb-4 flex items-center gap-2">
-          <label htmlFor="provider-select" className="text-sm font-medium text-gray-700 dark:text-gray-300">Provider:</label>
+          <label htmlFor="provider-select" className={`text-sm font-medium ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Provider:</label>
           <select
             id="provider-select"
             value={selectedProvider}
             onChange={e => setSelectedProvider(e.target.value)}
-            className="px-3 py-2 border border-gray-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-800"
+            className={`px-3 py-2 border rounded-lg ${darkMode ? 'bg-neutral-800 border-neutral-700 text-white' : 'bg-white border-gray-300 text-gray-900'}`}
           >
-            {providers.filter(p => p.status === 'connected').map(p => (
+            {aiProviders.map(p => (
               <option key={p.id} value={p.id}>{p.name}</option>
             ))}
           </select>
         </div>
       )}
-      <div className="h-96 overflow-y-auto mb-4 bg-gray-50 dark:bg-neutral-800 rounded p-4">
+      <div className={`h-96 overflow-y-auto mb-4 rounded p-4 transition-colors duration-300
+        ${darkMode ? 'bg-neutral-800 text-white' : 'bg-gray-50 text-gray-900'}`}
+      >
         {messages.map((msg, i) => (
           <div key={i} className={`mb-3 ${msg.sender === 'user' ? 'text-right' : 'text-left'}`}>
-            <div className={`inline-block px-4 py-2 rounded-lg ${msg.sender === 'user' ? 'bg-blue-200 dark:bg-neutral-700' : 'bg-green-100 dark:bg-neutral-900'} max-w-[80%]`}>
+            <div className={`inline-block px-4 py-2 rounded-lg max-w-[80%] transition-colors duration-300
+              ${msg.sender === 'user'
+                ? (darkMode ? 'bg-neutral-700 text-white' : 'bg-blue-200 text-gray-900')
+                : (darkMode ? 'bg-neutral-900 text-white' : 'bg-green-100 text-gray-900')}
+            `}>
               <div>{msg.text}</div>
               {msg.attachmentName && (
-                <div className="mt-1 text-xs text-gray-500">📎 {msg.attachmentName}</div>
+                <div className={`mt-1 text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>📎 {msg.attachmentName}</div>
               )}
             </div>
           </div>
         ))}
-        {loading && <div className="text-center text-gray-400">AI is thinking...</div>}
+        {loading && <div className={`text-center ${darkMode ? 'text-gray-400' : 'text-gray-400'}`}>AI is thinking...</div>}
       </div>
       <form onSubmit={handleSend} className="flex items-center space-x-2">
         <input
@@ -190,7 +192,8 @@ export const SmartChat: React.FC<SmartChatProps> = ({ inputValue, setInputValue,
           onChange={handleChange}
           onKeyDown={handleKeyDown}
           placeholder={inputPlaceholder || "Type your message or command..."}
-          className="flex-1 px-4 py-2 border border-gray-300 dark:border-neutral-700 rounded-lg bg-white dark:bg-neutral-800"
+          className={`flex-1 px-4 py-2 border rounded-lg transition-colors duration-300
+            ${darkMode ? 'bg-neutral-800 border-neutral-700 text-white placeholder-gray-400' : 'bg-white border-gray-300 text-gray-900'}`}
           disabled={loading}
         />
         <input
@@ -202,21 +205,23 @@ export const SmartChat: React.FC<SmartChatProps> = ({ inputValue, setInputValue,
         <button
           type="button"
           onClick={() => fileInputRef.current?.click()}
-          className="px-3 py-2 bg-neutral-700 text-white rounded-lg hover:bg-neutral-900"
+          className={`px-3 py-2 rounded-lg transition-colors duration-300
+            ${darkMode ? 'bg-neutral-700 text-white hover:bg-neutral-900' : 'bg-neutral-700 text-white hover:bg-neutral-900'}`}
           disabled={loading}
         >
           📎
         </button>
         <button
           type="submit"
-          className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:bg-gray-300"
+          className={`px-4 py-2 rounded-lg transition-colors duration-300
+            ${darkMode ? 'bg-green-700 text-white hover:bg-green-800 disabled:bg-gray-700' : 'bg-green-600 text-white hover:bg-green-700 disabled:bg-gray-300'}`}
           disabled={loading || (!value.trim() && !attachment)}
         >
           Send
         </button>
       </form>
       {attachment && (
-        <div className="mt-2 text-xs text-gray-600 dark:text-gray-300">Attached: {attachment.name}</div>
+        <div className={`mt-2 text-xs ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>Attached: {attachment.name}</div>
       )}
     </div>
   );
