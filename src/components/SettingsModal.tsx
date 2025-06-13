@@ -255,6 +255,12 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
   };
 
   if (!open) return null;
+  // Close when clicking the overlay background (outside the modal box)
+  const handleOverlayClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.target === e.currentTarget) {
+      onClose();
+    }
+  };
   // Unified settings items: providers + integrations
   const githubProvider = providers.find(p => p.id === 'github');
   const githubStatus = githubProvider?.apiKey ? 'connected' : 'disconnected';
@@ -391,7 +397,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
     ...integrationItems
   ];
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40" onClick={handleOverlayClick}>
       <div className="bg-white dark:bg-neutral-900 rounded-2xl p-0 w-full max-w-2xl shadow-2xl relative flex flex-col h-[80vh]">
         <button onClick={onClose} className="absolute top-6 right-8 text-2xl text-gray-400 hover:text-gray-700 dark:hover:text-white z-20">✕</button>
         <h2 className="text-2xl font-bold px-10 pt-8 pb-4 border-b border-gray-200 dark:border-neutral-800">Settings</h2>

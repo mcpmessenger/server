@@ -75,8 +75,14 @@ const MCP_COMMANDS = [
   { id: 'repo-summary', name: 'Repository Summary', description: 'Summarize repository structure and content', providers: ['github'] },
   { id: 'code-search', name: 'Code Search', description: 'Search code in repositories', providers: ['github'] },
   { id: 'generate-issue', name: 'Generate Issue', description: 'Create GitHub issue', providers: ['github'] },
-  { id: 'generate-pr', name: 'Generate PR', description: 'Create GitHub pull request', providers: ['github'] }
+  { id: 'generate-pr', name: 'Generate PR', description: 'Create GitHub pull request', providers: ['github'] },
+  { id: 'list-messages', name: 'List Gmail messages', description: 'List recent Gmail messages', providers: ['gmail'] },
+  { id: 'get-message',   name: 'Get Gmail message',    description: 'Fetch Gmail message by ID', providers: ['gmail'] },
+  { id: 'send-email',    name: 'Send Email',            description: 'Send an email via Gmail',  providers: ['gmail'] }
 ];
+
+// Maximum number of recent chat turns we keep when forwarding to LLMs
+const HISTORY_LIMIT = 6;
 
 // MCP Provider Plugin Interface
 class ProviderPlugin {
@@ -107,10 +113,14 @@ class GitHubProviderPlugin extends ProviderPlugin {
     if (!apiKey) {
       throw new Error('GitHub API key (Personal Access Token) is required.');
     }
-    
     const octokit = new Octokit({ auth: apiKey });
 
-    switch (command) {
+    // Normalize command: lower-case and replace spaces with dashes
+    const cmd = (command || '')
+      .toLowerCase()
+      .replace(/[\s_]+/g, '-'); // convert spaces or underscores to dashes
+
+    switch (cmd) {
       case 'list-repos': {
         const { data } = await octokit.repos.listForAuthenticatedUser({ per_page: 100 });
         const repoNames = data.map(repo => repo.full_name).join('\n');
@@ -202,8 +212,84 @@ class GitHubProviderPlugin extends ProviderPlugin {
   }
 }
 
+// Gmail Provider Plugin - MCP compliant
+class GmailProviderPlugin extends ProviderPlugin {
+  id = 'gmail';
+  name = 'Gmail';
+  supportedCommands = ['list-messages', 'get-message', 'send-email'];
+
+  // helper to build Gmail client from OAuth bearer token
+  buildGmailClient(accessToken) {
+    const authClient = new google.auth.OAuth2();
+    authClient.setCredentials({ access_token: accessToken });
+    return google.gmail({ version: 'v1', auth: authClient });
+  }
+
+  async executeCommand({ prompt, command, apiKey /* here apiKey carries accessToken */ }) {
+    if (!apiKey) {
+      throw new Error('Google OAuth access token required.');
+    }
+    const gmail = this.buildGmailClient(apiKey);
+
+    // Accept both "get-message" and "get-message <id>" (with id appended)
+    const parts = (command || '').trim().split(/\s+/);
+    const cmdBase = parts[0].toLowerCase().replace(/[\s_]+/g, '-');
+    const argString = parts.slice(1).join(' '); // rest of command after first token
+
+    const cmd = cmdBase;
+
+    switch (cmd) {
+      case 'list-messages': {
+        const { data } = await gmail.users.messages.list({ userId: 'me', maxResults: 20 });
+        return {
+          output: data.messages || [],
+          provider: this.id,
+          command: cmd,
+          raw_response: data
+        };
+      }
+      case 'get-message': {
+        const messageId = argString;
+        if (!messageId) throw new Error('Prompt must contain Gmail message ID');
+        const { data } = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
+        return {
+          output: data,
+          provider: this.id,
+          command: cmd,
+          raw_response: data
+        };
+      }
+      case 'send-email': {
+        // Expect prompt as JSON: { to, subject, body }
+        let payload;
+        try { payload = JSON.parse(prompt); }
+        catch { throw new Error('Prompt must be JSON with to, subject, body'); }
+        const { to, subject, body } = payload;
+        if (!to || !subject || !body) throw new Error('to, subject, body required');
+        const emailLines = [
+          `To: ${to}`,
+          'Content-Type: text/plain; charset="UTF-8"',
+          `Subject: ${subject}`,
+          '',
+          body
+        ];
+        const encodedMessage = Buffer.from(emailLines.join('\n'))
+          .toString('base64')
+          .replace(/\+/g, '-')
+          .replace(/\//g, '_')
+          .replace(/=+$/, '');
+        const { data } = await gmail.users.messages.send({ userId: 'me', requestBody: { raw: encodedMessage } });
+        return { output: 'Email sent.', provider: this.id, command: cmd, raw_response: data };
+      }
+      default:
+        throw new Error(`Unknown command: ${command}`);
+    }
+  }
+}
+
 // Initialize provider plugins
 const githubProviderPlugin = new GitHubProviderPlugin();
+const gmailProviderPlugin = new GmailProviderPlugin();
 
 // MCP Endpoints
 
@@ -238,6 +324,12 @@ app.get('/api/providers', (req, res) => {
       name: githubProviderPlugin.name,
       supportedCommands: githubProviderPlugin.supportedCommands,
       requiresApiKey: true
+    },
+    {
+      id: gmailProviderPlugin.id,
+      name: gmailProviderPlugin.name,
+      supportedCommands: gmailProviderPlugin.supportedCommands,
+      requiresApiKey: true
     }
   ];
   res.json(providers);
@@ -251,6 +343,9 @@ app.get('/api/providers/:providerId/resources', async (req, res) => {
   try {
     if (providerId === 'github') {
       const resources = await githubProviderPlugin.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'gmail') {
+      const resources = await gmailProviderPlugin.listResources({ apiKey });
       res.json({ resources });
     } else {
       res.status(400).json({ error: 'Provider does not support resource listing' });
@@ -295,10 +390,24 @@ function getGoogleAuthFromSession(req) {
   return client;
 }
 
-app.post('/api/command', async (req, res) => {
-  console.log('Received /api/command:', req.body);
+// --- Bearer token auth middleware for Google Drive commands ---
+function requireAuth(req, res, next) {
+  // Only enforce auth for Google Drive commands
+  if (req.body?.provider !== 'google_drive') {
+    return next();
+  }
+  const auth = req.headers.authorization || '';
+  if (!auth.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Missing token' });
+  }
+  req.googleToken = auth.replace('Bearer ', '');
+  next();
+}
+
+app.post('/api/command', requireAuth, async (req, res) => {
+  // Log only high-level details to avoid dumping full conversation to console
   const { prompt, provider, command, apiKey } = req.body;
-  console.log('Provider:', provider, 'Command:', command, 'API Key:', apiKey);
+  console.log('Received /api/command', { provider, command, promptLength: prompt?.length, hasApiKey: !!apiKey, msgCount: Array.isArray(req.body.messages) ? req.body.messages.length : 0 });
   let formattedPrompt = prompt;
 
   switch (command) {
@@ -332,8 +441,8 @@ app.post('/api/command', async (req, res) => {
       if (!messagesToSend) {
         messagesToSend = [{ role: 'user', content: formattedPrompt }];
       }
-      if (Array.isArray(messagesToSend) && messagesToSend.length > 10) {
-        messagesToSend = messagesToSend.slice(-10);
+      if (Array.isArray(messagesToSend) && messagesToSend.length > HISTORY_LIMIT) {
+        messagesToSend = messagesToSend.slice(-HISTORY_LIMIT);
       }
 
       const completion = await openai.chat.completions.create({
@@ -353,7 +462,7 @@ app.post('/api/command', async (req, res) => {
         return res.status(400).json({ error: 'No Anthropic API key provided.' });
       }
       // Limit messages to last 10
-      let messages = Array.isArray(req.body.messages) ? req.body.messages.slice(-10) : [{ role: 'user', content: formattedPrompt }];
+      let messages = Array.isArray(req.body.messages) ? req.body.messages.slice(-HISTORY_LIMIT) : [{ role: 'user', content: formattedPrompt }];
       // Format messages for Claude 3 API
       const claudeMessages = messages.map(m => ({
         role: m.role,
@@ -393,8 +502,8 @@ app.post('/api/command', async (req, res) => {
       }
       // --- TRIM THE MESSAGES ARRAY TO LAST 10 ---
       let messages = req.body.messages || [{ role: 'user', content: formattedPrompt }];
-      if (Array.isArray(messages) && messages.length > 10) {
-        messages = messages.slice(-10);
+      if (Array.isArray(messages) && messages.length > HISTORY_LIMIT) {
+        messages = messages.slice(-HISTORY_LIMIT);
       }
       const contents = Array.isArray(messages)
         ? messages.map(m => ({ role: m.role, parts: [{ text: m.content }] }))
@@ -422,14 +531,61 @@ app.post('/api/command', async (req, res) => {
         provider: 'gemini',
         raw_response: data,
       });
+    } else if (provider === 'google_drive') {
+      // We expect the OAuth bearer token to be provided in req.googleToken (set by requireAuth)
+      const googleToken = req.googleToken;
+      if (!googleToken) {
+        return res.status(401).json({ error: 'Missing Google OAuth token' });
+      }
+
+      const authClient = new google.auth.OAuth2();
+      authClient.setCredentials({ access_token: googleToken });
+
+      const drive = google.drive({ version: 'v3', auth: authClient });
+
+      try {
+        // Currently support a single command: list-files
+        if (command === 'list-files' || /list files/i.test(prompt)) {
+          const { data } = await drive.files.list({ pageSize: 100, fields: 'files(id, name, mimeType)' });
+          const files = (data.files || []).map(f => `${f.name} (${f.mimeType})`).join('\n');
+          return res.json({
+            output: files || 'No files found.',
+            tokens_used: null,
+            model_version: 'google-drive-v3',
+            provider: 'google_drive',
+            command: 'list-files',
+            raw_response: data
+          });
+        }
+
+        // If command not recognized
+        return res.status(400).json({ error: `Unsupported Google Drive command: ${command}` });
+      } catch (err) {
+        console.error('[MCP Server] Google Drive error:', err.message);
+        return res.status(400).json({ error: err.message });
+      }
     } else if (provider === 'github') {
       try {
+        // If no command specified (e.g. "Test token"), just validate the token
+        if (!command || command === 'validate' || command === 'test-token') {
+          if (!apiKey) throw new Error('GitHub API key (PAT) is required.');
+          const octokit = new Octokit({ auth: apiKey });
+          await octokit.request('GET /user');
+          return res.json({ success: true, output: 'Token is valid', provider: 'github' });
+        }
         const result = await githubProviderPlugin.executeCommand({ command, prompt: formattedPrompt, apiKey });
         return res.json(result);
       } catch (err) {
         console.error('[MCP Server] GitHub error:', err.message);
         return res.status(400).json({ success: false, error: err.message });
       }
+    } else if (provider === 'gmail') {
+      // Determine access token: prefer Authorization header set earlier by requireAuth fallback, else session token
+      const bearerToken = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : null;
+      const accessToken = apiKey || bearerToken || (req.session.googleTokens?.access_token);
+
+      const result = await gmailProviderPlugin.executeCommand({ command, prompt: formattedPrompt, apiKey: accessToken });
+      return res.json(result);
     } else {
       return res.status(400).json({ error: 'Unsupported provider' });
     }

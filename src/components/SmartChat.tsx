@@ -23,7 +23,22 @@ function parseChainedCommands(input: string): string[] {
 }
 
 function isGithubCommand(input: string): boolean {
-  return /github.*repo|repo.*github|list.*repo|show.*repo|my.*repo|repo[- ]?summary|code[- ]?search|issue|pull[- ]?request|pr/i.test(input);
+  const lower = input.toLowerCase();
+  // Match common GitHub intents: slash commands, repo keywords, issues/PRs.
+  return (
+    lower.startsWith('/github') ||
+    /github.*repo/.test(lower) ||
+    /repo.*github/.test(lower) ||
+    /list.*repos?/.test(lower) ||
+    /show.*repos?/.test(lower) ||
+    /get.*repos?/.test(lower) ||
+    /my.*repos?/.test(lower) ||
+    /repositories?/.test(lower) ||
+    /repo[- ]?summary/.test(lower) ||
+    /code[- ]?search/.test(lower) ||
+    /\bissue\b/.test(lower) ||
+    /pull[- ]?request|\bpr\b/.test(lower)
+  );
 }
 
 export const SmartChat: React.FC<SmartChatProps & { minimized?: boolean; onRestore?: () => void; darkMode?: boolean }> = ({ inputValue, setInputValue, inputPlaceholder, providers, minimized, onRestore, darkMode }) => {
@@ -73,24 +88,65 @@ export const SmartChat: React.FC<SmartChatProps & { minimized?: boolean; onResto
     formData.append('message', value);
     if (attachment) formData.append('attachment', attachment);
     formData.append('history', JSON.stringify(messages));
+    // Default to the dropdown selection
     let providerToSend = selectedProvider;
+    let commandToSend = 'chat';
     let apiKeyToSend = aiProviders.find(p => p.id === selectedProvider)?.apiKey || '';
-    if (isGithubCommand(value)) {
+
+    // --- Slash-command parser for GitHub --------------------------------
+    const trimmed = value.trim();
+    if (trimmed.toLowerCase().startsWith('/github')) {
       providerToSend = 'github';
-      // Get GitHub token from providers prop
+      // simple sub-command extraction
+      if (/list\s+(inbox|messages)/i.test(trimmed)) {
+        commandToSend = 'list-messages';
+      } else if (/repo[- ]?summary/i.test(trimmed)) {
+        commandToSend = 'repo-summary';
+      } else if (/code[- ]?search/i.test(trimmed)) {
+        commandToSend = 'code-search';
+      } else if (/issue/i.test(trimmed)) {
+        commandToSend = 'generate-issue';
+      } else if (/pull[- ]?request|\bpr\b/i.test(trimmed)) {
+        commandToSend = 'generate-pr';
+      }
+    } else if (isGithubCommand(trimmed)) {
+      providerToSend = 'github';
+      if (/list\s+repos?/i.test(trimmed) || /get\s+repos?/i.test(trimmed) || /show\s+repos?/i.test(trimmed)) {
+        commandToSend = 'list-repos';
+      }
+    }
+
+    // Get GitHub PAT if needed
+    if (providerToSend === 'github') {
       const githubProvider = providers?.find(p => p.id === 'github');
       apiKeyToSend = githubProvider?.apiKey || '';
-      console.log('Using GitHub token:', apiKeyToSend); // Debug log
     }
+
+    // Attach routing data to the form
     formData.append('provider', providerToSend);
+    formData.append('command', commandToSend);
     formData.append('apiKey', apiKeyToSend);
-    const res = await fetch('http://localhost:3001/api/chat', {
-      method: 'POST',
-      body: formData,
-      credentials: 'include',
-    });
-    const data = await res.json();
-    setMessages((prev) => [...prev, { sender: 'ai', text: data.response }]);
+    //---------------------------------------------------------------------
+
+    let aiText = '';
+    if (providerToSend === 'github') {
+      const cmdRes = await fetch('http://localhost:3001/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: value, provider: providerToSend, command: commandToSend, apiKey: apiKeyToSend })
+      });
+      const cmdData = await cmdRes.json();
+      aiText = cmdData.output || JSON.stringify(cmdData);
+    } else {
+      const res = await fetch('http://localhost:3001/api/chat', {
+        method: 'POST',
+        body: formData,
+        credentials: 'include',
+      });
+      const data = await res.json();
+      aiText = data.response;
+    }
+    setMessages((prev) => [...prev, { sender: 'ai', text: aiText }]);
     setLoading(false);
   };
 

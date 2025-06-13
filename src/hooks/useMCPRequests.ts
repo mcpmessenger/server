@@ -25,13 +25,14 @@ export const useMCPRequests = () => {
     setLoading(true);
 
     try {
-      // Call the backend /api/command endpoint
+      const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+      if (provider === 'google_drive' && apiKey) {
+        headers['Authorization'] = `Bearer ${apiKey}`;
+      }
       const response = await fetch('http://localhost:3001/api/command', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ prompt, provider, command, apiKey }),
+        headers,
+        body: JSON.stringify({ prompt, provider, command, apiKey: provider === 'google_drive' ? undefined : apiKey }),
       });
       const data = await response.json();
 

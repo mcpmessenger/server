@@ -175,4 +175,49 @@ Chained commands allow apps or users to combine multiple actions in a single wor
 
 ---
 
-**For questions, contributions, or commercial use, contact [automationalien.com](https://automationalien.com)** 
+**For questions, contributions, or commercial use, contact [automationalien.com](https://automationalien.com)**
+
+---
+
+## MCP API Reference
+
+### List Supported Commands
+
+```
+GET /api/commands
+```
+Returns all commands the MCP server currently exposes. Example response (truncated):
+
+```json
+[
+  { "id": "chat",           "description": "Conversational AI" },
+  { "id": "summarize",      "description": "Summarize text or documents" },
+  { "id": "generate-code", "description": "Generate code snippets" },
+  { "id": "explain",        "description": "Explain concepts or code" },
+  { "id": "translate",      "description": "Translate text" },
+  { "id": "list-repos",     "description": "List GitHub repositories",        "providers": ["github"] },
+  { "id": "get-file",       "description": "Fetch file content from repository","providers": ["github"] },
+  { "id": "repo-summary",   "description": "Summarize repository structure",  "providers": ["github"] },
+  { "id": "code-search",    "description": "Search code in repositories",     "providers": ["github"] },
+  { "id": "generate-issue", "description": "Create GitHub issue",             "providers": ["github"] },
+  { "id": "generate-pr",    "description": "Create GitHub pull-request",      "providers": ["github"] }
+]
+```
+
+### List Providers & Their Capabilities
+
+```
+GET /api/providers
+```
+Each provider entry lists the commands it supports:
+
+```json
+[
+  { "id": "openai",    "supportedCommands": ["chat","summarize","generate-code","explain","translate"] },
+  { "id": "anthropic", "supportedCommands": ["chat","summarize","generate-code","explain","translate"] },
+  { "id": "gemini",    "supportedCommands": ["chat","summarize","generate-code","explain","translate"] },
+  { "id": "github",    "supportedCommands": ["list-repos","get-file","repo-summary","code-search","generate-issue","generate-pr"] }
+]
+```
+
+Use these endpoints to dynamically build command palettes or validate which operations are available without hard-coding them in the front-end. 
