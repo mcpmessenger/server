@@ -13,7 +13,7 @@ import { SmartChat } from './components/SmartChat';
 import { SettingsModal } from './components/SettingsModal';
 import { CommandList } from './components/CommandList';
 import { ChromeGrid } from './components/ui/chrome-grid';
-import { MessageCircle } from 'lucide-react';
+import { MessageCircle, Bot, Zap, Sparkles, Github, Globe } from 'lucide-react';
 
 interface WorkflowStep {
   provider: string;

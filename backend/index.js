@@ -61,22 +61,206 @@ const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const GITHUB_CALLBACK = 'http://localhost:3001/auth/github/callback';
 
+// --- MCP Protocol Implementation ---
 
-// --- Add this for MCP compatibility ---
+// Command Registry - MCP compliant
+const MCP_COMMANDS = [
+  { id: 'chat', name: 'Chat', description: 'Conversational AI', providers: ['openai', 'anthropic', 'gemini'] },
+  { id: 'summarize', name: 'Summarize', description: 'Summarize text or documents', providers: ['openai', 'anthropic', 'gemini'] },
+  { id: 'generate-code', name: 'Generate Code', description: 'Generate code snippets', providers: ['openai', 'anthropic', 'gemini'] },
+  { id: 'explain', name: 'Explain', description: 'Explain concepts or code', providers: ['openai', 'anthropic', 'gemini'] },
+  { id: 'translate', name: 'Translate', description: 'Translate text to different languages', providers: ['openai', 'anthropic', 'gemini'] },
+  { id: 'list-repos', name: 'List Repositories', description: 'List GitHub repositories', providers: ['github'] },
+  { id: 'get-file', name: 'Get File', description: 'Fetch file content from repository', providers: ['github'] },
+  { id: 'repo-summary', name: 'Repository Summary', description: 'Summarize repository structure and content', providers: ['github'] },
+  { id: 'code-search', name: 'Code Search', description: 'Search code in repositories', providers: ['github'] },
+  { id: 'generate-issue', name: 'Generate Issue', description: 'Create GitHub issue', providers: ['github'] },
+  { id: 'generate-pr', name: 'Generate PR', description: 'Create GitHub pull request', providers: ['github'] }
+];
+
+// MCP Provider Plugin Interface
+class ProviderPlugin {
+  constructor(options = {}) {
+    this.options = options;
+  }
+  
+  id = 'base';
+  name = 'Base Provider';
+  supportedCommands = [];
+
+  async executeCommand({ prompt, command, context, apiKey }) {
+    throw new Error('executeCommand must be implemented by provider');
+  }
+
+  async listResources(params) {
+    throw new Error('listResources not implemented');
+  }
+}
+
+// GitHub Provider Plugin - MCP compliant
+class GitHubProviderPlugin extends ProviderPlugin {
+  id = 'github';
+  name = 'GitHub';
+  supportedCommands = ['list-repos', 'get-file', 'repo-summary', 'code-search', 'generate-issue', 'generate-pr'];
+
+  async executeCommand({ prompt, command, context, apiKey }) {
+    if (!apiKey) {
+      throw new Error('GitHub API key (Personal Access Token) is required.');
+    }
+    
+    const octokit = new Octokit({ auth: apiKey });
+
+    switch (command) {
+      case 'list-repos': {
+        const { data } = await octokit.repos.listForAuthenticatedUser({ per_page: 100 });
+        const repoNames = data.map(repo => repo.full_name).join('\n');
+        return { 
+          output: `Your repositories:\n${repoNames}`, 
+          tokens_used: null,
+          model_version: 'github-api-v3',
+          provider: this.id,
+          command,
+          raw_response: data
+        };
+      }
+      case 'get-file': {
+        // Parse prompt for owner/repo/path
+        const match = prompt.match(/([^\/]+)\/([^\/]+)\/(.+)/);
+        if (!match) {
+          throw new Error('Format: owner/repo/path/to/file');
+        }
+        const [, owner, repo, path] = match;
+        const { data } = await octokit.repos.getContent({ owner, repo, path });
+        const content = Buffer.from(data.content, 'base64').toString();
+        return {
+          output: content,
+          tokens_used: null,
+          model_version: 'github-api-v3',
+          provider: this.id,
+          command,
+          raw_response: data
+        };
+      }
+      case 'repo-summary': {
+        return { 
+          output: 'Repository summary feature is not yet implemented.',
+          tokens_used: null,
+          model_version: 'github-api-v3',
+          provider: this.id,
+          command,
+          raw_response: null
+        };
+      }
+      case 'code-search': {
+        return { 
+          output: 'Code search feature is not yet implemented.',
+          tokens_used: null,
+          model_version: 'github-api-v3',
+          provider: this.id,
+          command,
+          raw_response: null
+        };
+      }
+      case 'generate-issue': {
+        return { 
+          output: 'Issue creation feature is not yet implemented.',
+          tokens_used: null,
+          model_version: 'github-api-v3',
+          provider: this.id,
+          command,
+          raw_response: null
+        };
+      }
+      case 'generate-pr': {
+        return { 
+          output: 'PR creation feature is not yet implemented.',
+          tokens_used: null,
+          model_version: 'github-api-v3',
+          provider: this.id,
+          command,
+          raw_response: null
+        };
+      }
+      default:
+        throw new Error(`Unknown command: ${command}`);
+    }
+  }
+
+  async listResources({ apiKey }) {
+    if (!apiKey) {
+      throw new Error('GitHub API key required');
+    }
+    const octokit = new Octokit({ auth: apiKey });
+    const { data } = await octokit.repos.listForAuthenticatedUser({ per_page: 100 });
+    return data.map(repo => ({
+      id: repo.id,
+      name: repo.full_name,
+      type: 'repository',
+      url: repo.html_url,
+      description: repo.description
+    }));
+  }
+}
+
+// Initialize provider plugins
+const githubProviderPlugin = new GitHubProviderPlugin();
+
+// MCP Endpoints
+
+// Get available commands - MCP compliant
 app.get('/api/commands', (req, res) => {
-  // You can customize this list as needed for your app/providers
-  res.json([
-    "chat",
-    "summarize",
-    "generate-code",
-    "explain",
-    "translate"
-  ]);
+  res.json(MCP_COMMANDS);
 });
 
+// Get provider information - MCP extension
+app.get('/api/providers', (req, res) => {
+  const providers = [
+    {
+      id: 'openai',
+      name: 'OpenAI',
+      supportedCommands: ['chat', 'summarize', 'generate-code', 'explain', 'translate'],
+      requiresApiKey: true
+    },
+    {
+      id: 'anthropic',
+      name: 'Anthropic',
+      supportedCommands: ['chat', 'summarize', 'generate-code', 'explain', 'translate'],
+      requiresApiKey: true
+    },
+    {
+      id: 'gemini',
+      name: 'Gemini',
+      supportedCommands: ['chat', 'summarize', 'generate-code', 'explain', 'translate'],
+      requiresApiKey: true
+    },
+    {
+      id: githubProviderPlugin.id,
+      name: githubProviderPlugin.name,
+      supportedCommands: githubProviderPlugin.supportedCommands,
+      requiresApiKey: true
+    }
+  ];
+  res.json(providers);
+});
 
+// Get resources for a provider - MCP extension
+app.get('/api/providers/:providerId/resources', async (req, res) => {
+  const { providerId } = req.params;
+  const { apiKey } = req.query;
+  
+  try {
+    if (providerId === 'github') {
+      const resources = await githubProviderPlugin.listResources({ apiKey });
+      res.json({ resources });
+    } else {
+      res.status(400).json({ error: 'Provider does not support resource listing' });
+    }
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
-
+// MCP compatibility - commands endpoint already defined above
 
 app.get('/auth/google', (req, res) => {
   const url = oauth2Client.generateAuthUrl({
@@ -240,8 +424,8 @@ app.post('/api/command', async (req, res) => {
       });
     } else if (provider === 'github') {
       try {
-        const result = await githubProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
-        return res.json({ success: true, ...result });
+        const result = await githubProviderPlugin.executeCommand({ command, prompt: formattedPrompt, apiKey });
+        return res.json(result);
       } catch (err) {
         console.error('[MCP Server] GitHub error:', err.message);
         return res.status(400).json({ success: false, error: err.message });
@@ -771,6 +955,16 @@ app.post('/api/validate/provider', express.json(), async (req, res) => {
       // Try to list models
       await genAI.listModels();
       return res.json({ success: true });
+    } else if (provider === 'github') {
+      const { Octokit } = await import('@octokit/rest');
+      const octokit = new Octokit({ auth: apiKey });
+      try {
+        // Try a simple authenticated call
+        await octokit.request('GET /user');
+        return res.json({ success: true });
+      } catch (err) {
+        return res.json({ success: false, error: err.message });
+      }
     } else {
       return res.json({ success: false, error: 'Provider not supported for validation.' });
     }

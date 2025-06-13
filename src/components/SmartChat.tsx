@@ -77,7 +77,10 @@ export const SmartChat: React.FC<SmartChatProps & { minimized?: boolean; onResto
     let apiKeyToSend = aiProviders.find(p => p.id === selectedProvider)?.apiKey || '';
     if (isGithubCommand(value)) {
       providerToSend = 'github';
-      apiKeyToSend = providers?.find(p => p.id === 'github')?.apiKey || '';
+      // Get GitHub token from providers prop
+      const githubProvider = providers?.find(p => p.id === 'github');
+      apiKeyToSend = githubProvider?.apiKey || '';
+      console.log('Using GitHub token:', apiKeyToSend); // Debug log
     }
     formData.append('provider', providerToSend);
     formData.append('apiKey', apiKeyToSend);
