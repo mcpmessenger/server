@@ -221,3 +221,44 @@ Each provider entry lists the commands it supports:
 ```
 
 Use these endpoints to dynamically build command palettes or validate which operations are available without hard-coding them in the front-end. 
+
+## External Automation Connectors (n8n, Make.com, Zapier)
+
+The project now ships with first-class, open-source connectors that let anyone orchestrate MCP commands and workflows in their favorite no-code tools.
+
+| Platform | Location in Repo | What's Included |
+|----------|------------------|-----------------|
+| **n8n**  | `integrations/n8n-nodes-mcp/` | Custom node **MCP** with `Command` & `Workflow` resources and credential type (Base URL + optional API key). Build via `npm run build` and install inside your n8n instance with `npm i n8n-nodes-mcp`. |
+| **Make.com** | `integrations/makecom/mcp-app.json` | Importable JSON definition exposing *Execute Command* & *Execute Workflow* actions. |
+| **Zapier** | `integrations/zapier-mcp/` | Zapier Platform CLI app with custom auth, ping trigger, and the same two actions. Deploy with `zapier push`. |
+
+All three connectors share the identical credential model:
+
+* **Base URL** – root of your MCP server (e.g. `https://api.my-mcp.com`)
+* **API Key** – optional; include only if your instance enforces key-based auth
+
+### Quickstart
+
+```
+# n8n (inside your n8n container / directory)
+npm i n8n-nodes-mcp && n8n restart
+
+# Make.com
+# 1. Open Make.com ➜ Apps ➜ Create Custom App ➜ Import JSON
+# 2. Paste the contents of integrations/makecom/mcp-app.json
+
+# Zapier
+npm i -g zapier-platform-cli
+cd integrations/zapier-mcp
+npm install
+zapier login
+zapier push   # follow prompts to create a private version
+```
+
+See the individual READMEs in each folder for more details.
+
+---
+
+## Claude Desktop Integration – Quick Start
+
+```README.md

@@ -1,0 +1,81 @@
+{
+  "name": "MCP",
+  "description": "Interact with the Multi-provider Command Protocol Server (MCP)",
+  "version": "0.1.0",
+  "documentationUrl": "https://github.com/your-org/makecom-mcp",
+  "authentication": {
+    "type": "apiKey",
+    "fields": [
+      {
+        "name": "baseUrl",
+        "type": "string",
+        "label": "Base URL",
+        "default": "https://your-mcp-server.com"
+      },
+      {
+        "name": "apiKey",
+        "type": "string",
+        "label": "API Key",
+        "default": ""
+      }
+    ],
+    "addTo": "query",
+    "paramName": "apiKey"
+  },
+  "actions": [
+    {
+      "name": "Execute Command",
+      "description": "Execute a single command against the MCP Server",
+      "type": "action",
+      "http": {
+        "url": "{{baseUrl}}/api/command",
+        "method": "POST",
+        "body": {
+          "prompt": "{{input.prompt}}",
+          "provider": "{{input.provider}}",
+          "command": "{{input.command}}",
+          "context": "{{input.context}}",
+          "apiKey": "{{apiKey}}"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "input": [
+        { "name": "provider", "type": "text", "label": "Provider" },
+        { "name": "command", "type": "text", "label": "Command" },
+        { "name": "prompt", "type": "text", "label": "Prompt", "multiline": true },
+        { "name": "context", "type": "text", "label": "Context", "optional": true }
+      ],
+      "output": [
+        { "name": "output", "type": "text" },
+        { "name": "tokens_used", "type": "number" },
+        { "name": "model_version", "type": "text" }
+      ]
+    },
+    {
+      "name": "Execute Workflow",
+      "description": "Execute a multi-step workflow",
+      "type": "action",
+      "http": {
+        "url": "{{baseUrl}}/api/workflow",
+        "method": "POST",
+        "body": {
+          "workflow": "{{input.workflow}}",
+          "context": "{{input.context}}"
+        },
+        "headers": {
+          "Content-Type": "application/json"
+        }
+      },
+      "input": [
+        { "name": "workflow", "type": "text", "label": "Workflow JSON", "multiline": true },
+        { "name": "context", "type": "text", "label": "Context", "optional": true }
+      ],
+      "output": [
+        { "name": "results", "type": "collection" }
+      ]
+    }
+  ],
+  "triggers": []
+} 
