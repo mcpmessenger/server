@@ -19,7 +19,7 @@ dotenv.config();
 
 const app = express();
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5176'],
+  origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5176', 'http://localhost:5177'],
   credentials: true
 }));
 app.use(bodyParser.json({ limit: '10mb' }));
@@ -372,6 +372,11 @@ app.get('/auth/google/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     req.session.googleTokens = tokens;
+    // Persist refresh_token (first-time auth) to user row
+    if (tokens.refresh_token) {
+      const user = await getOrCreateUser();
+      await db.run('UPDATE User SET googleRefreshToken = ? WHERE id = ?', tokens.refresh_token, user.id);
+    }
     res.send('Google authentication successful! You can close this window.');
   } catch (err) {
     console.error('Google OAuth error:', err);
@@ -379,14 +384,35 @@ app.get('/auth/google/callback', async (req, res) => {
   }
 });
 
-function getGoogleAuthFromSession(req) {
+async function getGoogleAuthFromSession(req) {
   if (!req.session.googleTokens) return null;
+
   const client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     'http://localhost:3001/auth/google/callback'
   );
+
   client.setCredentials(req.session.googleTokens);
+
+  // Auto-refresh access token if expired or about to expire (less than 2 min)
+  const expiryDate = req.session.googleTokens.expiry_date || 0;
+  const now = Date.now();
+  if (expiryDate && expiryDate - now < 120_000 && req.session.googleTokens.refresh_token) {
+    try {
+      const { credentials } = await client.refreshAccessToken();
+      // Merge new credentials back into session
+      req.session.googleTokens = {
+        ...req.session.googleTokens,
+        access_token: credentials.access_token,
+        expiry_date: credentials.expiry_date || (now + 3_300_000) // ~55min
+      };
+      client.setCredentials(req.session.googleTokens);
+    } catch (err) {
+      console.error('Google token refresh failed:', err.message);
+    }
+  }
+
   return client;
 }
 
@@ -404,7 +430,7 @@ function requireAuth(req, res, next) {
   next();
 }
 
-app.post('/api/command', requireAuth, async (req, res) => {
+app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
   // Log only high-level details to avoid dumping full conversation to console
   const { prompt, provider, command, apiKey } = req.body;
   console.log('Received /api/command', { provider, command, promptLength: prompt?.length, hasApiKey: !!apiKey, msgCount: Array.isArray(req.body.messages) ? req.body.messages.length : 0 });
@@ -579,6 +605,69 @@ app.post('/api/command', requireAuth, async (req, res) => {
         console.error('[MCP Server] GitHub error:', err.message);
         return res.status(400).json({ success: false, error: err.message });
       }
+    } else if (provider === 'zapier') {
+      // Basic Zapier NLA support (https://nla.zapier.com/api/v1/)
+      const zapierKey = apiKey || req.body?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : '');
+      if (!zapierKey) {
+        return res.status(401).json({ error: 'Missing Zapier API key' });
+      }
+      try {
+        // Currently support a single command: list-zaps (lists available AI Zaps for the user)
+        if (command === 'list-zaps' || /list zaps/i.test(command || formattedPrompt)) {
+          const resp = await fetch('https://nla.zapier.com/api/v1/ai_zaps/', {
+            headers: {
+              Authorization: `Bearer ${zapierKey}`,
+              Accept: 'application/json'
+            }
+          });
+
+          const isJson = resp.headers.get('content-type')?.includes('application/json');
+          const payload = isJson ? await resp.json().catch(async () => ({ text: await resp.text() })) : await resp.text();
+
+          if (!resp.ok) {
+            return res.status(resp.status).json({ error: payload });
+          }
+
+          return res.json({
+            output: Array.isArray(payload) ? payload.map(z => `${z.id}: ${z.description || z.name}`).join('\n') : JSON.stringify(payload),
+            provider: 'zapier',
+            command: 'list-zaps',
+            raw_response: payload
+          });
+        }
+        // trigger zap <id>
+        if (/^trigger zap/i.test(command || formattedPrompt)) {
+          const match = (command || formattedPrompt).match(/trigger zap\s+(\S+)/i);
+          const zapId = match?.[1];
+          if (!zapId) {
+            return res.status(400).json({ error: 'Missing Zap ID' });
+          }
+          const execResp = await fetch(`https://nla.zapier.com/api/v1/ai_zaps/${zapId}/execute/`, {
+            method: 'POST',
+            headers: { Authorization: `Bearer ${zapierKey}` }
+          });
+
+          // Zapier returns JSON on success but may return HTML for 404/403
+          const isJson = execResp.headers.get('content-type')?.includes('application/json');
+          const payload = isJson ? await execResp.json().catch(async () => ({ text: await execResp.text() })) : await execResp.text();
+
+          if (!execResp.ok) {
+            return res.status(execResp.status).json({ error: payload });
+          }
+
+          return res.status(execResp.status).json({
+            output: (payload.results || payload).description || payload.results || payload,
+            provider: 'zapier',
+            command: `trigger-zap-${zapId}`,
+            raw_response: payload
+          });
+        }
+        // If command not recognized yet
+        return res.status(400).json({ error: `Unsupported Zapier command: ${command}` });
+      } catch (err) {
+        console.error('[MCP Server] Zapier error:', err.message);
+        return res.status(400).json({ error: err.message });
+      }
     } else if (provider === 'gmail') {
       // Determine access token: prefer Authorization header set earlier by requireAuth fallback, else session token
       const bearerToken = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : null;
@@ -688,7 +777,7 @@ app.post('/api/workflow', async (req, res) => {
 });
 
 app.get('/api/google/drive-files', async (req, res) => {
-  const auth = getGoogleAuthFromSession(req);
+  const auth = await getGoogleAuthFromSession(req);
   if (!auth) return res.status(401).json({ error: 'Not authenticated with Google' });
   const drive = google.drive({ version: 'v3', auth });
   const files = await drive.files.list({ pageSize: 20, fields: 'files(id, name, mimeType)' });
@@ -696,7 +785,7 @@ app.get('/api/google/drive-files', async (req, res) => {
 });
 
 app.get('/api/google/gmail-messages', async (req, res) => {
-  const auth = getGoogleAuthFromSession(req);
+  const auth = await getGoogleAuthFromSession(req);
   if (!auth) return res.status(401).json({ error: 'Not authenticated with Google' });
   const gmail = google.gmail({ version: 'v1', auth });
   const messages = await gmail.users.messages.list({ userId: 'me', maxResults: 20 });
@@ -957,7 +1046,16 @@ app.post('/api/google/disconnect', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Backend running on port ${PORT}`);
+  // DEBUG – list every POST route on start-up
+  console.log(
+    'POST routes →',
+    app._router.stack
+      .filter(l => l.route && l.route.methods.post)
+      .map(l => l.route.path)
+  );
+});
 
 app.post('/api/github/trigger-action', async (req, res) => {
   const octokit = getGitHubOctokitFromSession(req);
@@ -1040,7 +1138,9 @@ let db;
       zapierUrl TEXT,
       zapierSecret TEXT,
       n8nUrl TEXT,
-      n8nSecret TEXT
+      n8nSecret TEXT,
+      googleRefreshToken TEXT,
+      githubPAT TEXT
     );
     CREATE TABLE IF NOT EXISTS Webhook (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1151,5 +1251,178 @@ app.post('/api/validate/webhook', express.json(), async (req, res) => {
 // Health check endpoint
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Helper to fetch single user row (id=1) or create if missing
+async function getOrCreateUser() {
+  let user = await db.get('SELECT * FROM User LIMIT 1');
+  if (!user) {
+    await db.run('INSERT INTO User (githubId) VALUES (NULL)');
+    user = await db.get('SELECT * FROM User LIMIT 1');
+  }
+  return user;
+}
+
+// --- GitHub PAT storage endpoints ---
+app.get('/api/user/github-token', async (req, res) => {
+  try {
+    const user = await getOrCreateUser();
+    res.json({ token: user.githubPAT || '' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/user/github-token', express.json(), async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  try {
+    const user = await getOrCreateUser();
+    await db.run('UPDATE User SET githubPAT = ? WHERE id = ?', token, user.id);
+    res.json({ saved: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/user/github-token', async (req, res) => {
+  try {
+    const user = await getOrCreateUser();
+    await db.run('UPDATE User SET githubPAT = NULL WHERE id = ?', user.id);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// MCP JSON-RPC endpoint — minimal support for initialize, tools/list, and tools/call
+app.post('/mcp', async (req, res) => {
+  const rpc = req.body;
+  if (!rpc || typeof rpc !== 'object' || !rpc.method) {
+    return res.status(400).json({ error: 'Invalid JSON-RPC request' });
+  }
+  const { id } = rpc; // undefined for notifications
+
+  const sendResult = (result) => res.json({ jsonrpc: '2.0', id, result });
+  const sendError = (code, message) => res.json({ jsonrpc: '2.0', id, error: { code, message } });
+
+  // If this is a notification (no id), handle known notifications silently
+  if (id === undefined) {
+    if (rpc.method === 'notifications/initialized') {
+      console.log('[MCP] Client initialized');
+      return res.end(); // No response for notifications per JSON-RPC spec
+    }
+    // Unknown notifications are simply ignored
+    return res.end();
+  }
+
+  try {
+    // 1) Capability negotiation / handshake
+    if (rpc.method === 'initialize') {
+      const requestedVersion = rpc.params?.protocolVersion;
+      const supportedVersions = ['2025-03-26', '2024-11-05'];
+      const version = supportedVersions.includes(requestedVersion)
+        ? requestedVersion
+        : '2025-03-26';
+
+      return sendResult({
+        protocolVersion: version,
+        serverInfo: {
+          name: 'mcpserver',
+          version: '0.1.0'
+        },
+        capabilities: {
+          logging: {},
+          prompts: { listChanged: true },
+          resources: { listChanged: true },
+          tools: { listChanged: true }
+        }
+      });
+    }
+
+    // 2) List available tools (one per command in MCP_COMMANDS)
+    if (rpc.method === 'tools/list') {
+      const tools = MCP_COMMANDS.map(cmd => ({
+        name: cmd.id,
+        description: cmd.description,
+        inputSchema: {
+          type: 'object',
+          properties: {
+            provider: { type: 'string', enum: cmd.providers },
+            prompt: { type: 'string' },
+            apiKey: { type: 'string' }
+          },
+          required: ['provider'],
+          additionalProperties: true
+        }
+      }));
+      return sendResult({ tools });
+    }
+
+    // 3) Execute a tool call by proxying to /api/command
+    if (rpc.method === 'tools/call') {
+      const { name, arguments: args } = rpc.params || {};
+      if (!name) return sendError(-32602, 'Missing tool name');
+
+      const provider = (args && args.provider) || 'openai';
+      const command = name; // tool name matches command id
+      const prompt = (args && args.prompt) || '';
+      const apiKey = args?.apiKey;
+
+      try {
+        const resp = await fetch(`http://localhost:${PORT}/api/command`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ prompt, provider, command, apiKey })
+        }).then(r => r.json());
+
+        if (resp.error) {
+          return sendResult({
+            content: [{ type: 'text', text: `Error: ${resp.error}` }],
+            isError: true
+          });
+        }
+
+        return sendResult({
+          content: [{ type: 'text', text: resp.output || '' }],
+          isError: false
+        });
+      } catch (err) {
+        return sendResult({
+          content: [{ type: 'text', text: `Internal error: ${err.message}` }],
+          isError: true
+        });
+      }
+    }
+
+    // Fallback for unknown methods
+    return sendError(-32601, `Unknown method ${rpc.method}`);
+  } catch (err) {
+    console.error('[MCP] Error:', err);
+    return sendError(-32603, err.message);
+  }
+});
+
+// ── MCP SSE stream ───────────────────────────────────────────────
+app.get('/mcp', (req, res) => {
+  console.log('[MCP] Incoming SSE connection from', req.ip);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  // Allow any origin so Claude Desktop (which runs its own origin) can connect during local dev
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();          // send headers now
+  // Send initial comment to complete EventSource handshake immediately
+  res.write(': connected\n\n');
+
+  // keep-alive ping every 20 s
+  const ping = setInterval(() => {
+    res.write('event: ping\ndata: {}\n\n');
+  }, 20000);
+
+  req.on('close', () => {
+    clearInterval(ping);
+    console.log('[MCP] SSE client', req.ip, 'disconnected');
+  });
 });
 

@@ -262,3 +262,33 @@ See the individual READMEs in each folder for more details.
 ## Claude Desktop Integration – Quick Start
 
 ```README.md
+
+```
+
+### Built-in Zapier Provider (AI Actions)
+
+MCP Server now supports Zapier **AI Actions (NLA)** natively via the `/api/command` endpoint.
+
+1. In Zapier, open your Zap ➜ **AI Actions** panel ➜ enable **Expose this Zap to AI** ➜ *Publish* the Zap so it's **On**.
+2. Generate an AI-Actions API key (it starts with `sk-nla-` or legacy `sk-ak-`).
+3. Call MCP with `provider="zapier"` and the key in the body (`apiKey`) or an `Authorization: Bearer …` header.
+
+```bash
+# List AI-enabled Zaps
+curl -X POST -H "Content-Type: application/json" \
+     -d '{"provider":"zapier","command":"list-zaps","apiKey":"<ZAPIER_NLA_KEY>"}' \
+     http://localhost:3001/api/command
+
+# Trigger a Zap (replace <ID> with one returned from list-zaps)
+curl -X POST -H "Content-Type: application/json" \
+     -d '{"provider":"zapier","command":"trigger zap <ID>","apiKey":"<ZAPIER_NLA_KEY>"}' \
+     http://localhost:3001/api/command
+```
+
+The server converts both requests into calls to Zapier's NLA endpoints:
+* `list-zaps`  → `GET https://nla.zapier.com/api/v1/ai_zaps/`
+* `trigger zap <id>` → `POST https://nla.zapier.com/api/v1/ai_zaps/<id>/execute/`
+
+All responses (including errors) are returned as JSON, making them safe to consume from the front-end or other automations.
+
+---
