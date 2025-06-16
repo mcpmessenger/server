@@ -13,7 +13,7 @@ import bodyParser from 'body-parser';
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import { jwtDecode } from "jwt-decode";
-import githubProvider from './providers/github.js';
+import { parseIntent } from './parser.js';
 
 dotenv.config();
 
@@ -78,8 +78,15 @@ const MCP_COMMANDS = [
   { id: 'generate-pr', name: 'Generate PR', description: 'Create GitHub pull request', providers: ['github'] },
   { id: 'list-messages', name: 'List Gmail messages', description: 'List recent Gmail messages', providers: ['gmail'] },
   { id: 'get-message',   name: 'Get Gmail message',    description: 'Fetch Gmail message by ID', providers: ['gmail'] },
-  { id: 'send-email',    name: 'Send Email',            description: 'Send an email via Gmail',  providers: ['gmail'] }
+  { id: 'send-email',    name: 'Send Email',            description: 'Send an email via Gmail',  providers: ['gmail'] },
+  { id: 'list-files',    name: 'List Drive Files',      description: 'List Google Drive files', providers: ['google_drive'] },
+  { id: 'search-files',  name: 'Search Drive Files',    description: 'Search Google Drive files', providers: ['google_drive'] },
+  { id: 'download-file', name: 'Download Drive File',   description: 'Download file content from Drive', providers: ['google_drive'] },
+  { id: 'upload-file',   name: 'Upload Drive File',     description: 'Upload a new file to Drive', providers: ['google_drive'] },
 ];
+
+// After the MCP_COMMANDS array is declared, insert the server version constant
+const MCP_SERVER_VERSION = '2024-07-01';
 
 // Maximum number of recent chat turns we keep when forwarding to LLMs
 const HISTORY_LIMIT = 6;
@@ -152,43 +159,96 @@ class GitHubProviderPlugin extends ProviderPlugin {
         };
       }
       case 'repo-summary': {
-        return { 
-          output: 'Repository summary feature is not yet implemented.',
+        // Extract first owner/repo pattern from prompt
+        const matchRepo = prompt.match(/([\w.-]+\/[\w.-]+)/);
+        if (!matchRepo) throw new Error('Prompt must contain owner/repo');
+        const [owner, repo] = matchRepo[1].split('/');
+        if (!owner || !repo) throw new Error('Format repo as owner/repo');
+        const { data: contents } = await octokit.repos.getContent({ owner, repo, path: '' });
+        // List first 100 top-level files/dirs
+        const listing = (Array.isArray(contents) ? contents : []).slice(0, 100).map(f => `${f.type}: ${f.name}`).join('\n');
+        const summary = `Top-level contents of ${owner}/${repo}:\n${listing}`;
+        return {
+          output: summary,
           tokens_used: null,
           model_version: 'github-api-v3',
           provider: this.id,
           command,
-          raw_response: null
+          raw_response: contents
         };
       }
       case 'code-search': {
-        return { 
-          output: 'Code search feature is not yet implemented.',
+        // Expect prompt like "searchTerm in owner/repo"
+        const match = prompt.match(/^(.*?)\s+in\s+([\w.-]+\/[\w.-]+)/i);
+        if (!match) throw new Error('Format: <searchTerm> in owner/repo');
+        const [, query, repoRef] = match;
+        const [owner, repo] = repoRef.split('/');
+        const { data } = await octokit.search.code({ q: `${query} repo:${owner}/${repo}`, per_page: 10 });
+        const results = data.items.map(i => `${i.path} (${i.html_url})`).join('\n');
+        return {
+          output: results || 'No matches found.',
           tokens_used: null,
           model_version: 'github-api-v3',
           provider: this.id,
           command,
-          raw_response: null
+          raw_response: data
         };
       }
       case 'generate-issue': {
-        return { 
-          output: 'Issue creation feature is not yet implemented.',
-          tokens_used: null,
-          model_version: 'github-api-v3',
+        // Expect prompt format: owner/repo | title | body (body optional)
+        const parts = prompt.replace(/^\s*\/github\s+generate-issue/i,'').split('|').map(p=>p.trim()).filter(Boolean);
+        if (parts.length < 2) {
+          // try plain language: "create issue in owner/repo: title - body"
+          let plainMatch = prompt.match(/issue\s+(?:in|on)\s+([\w.-]+\/[\w.-]+)\s*[:\-]\s*(.+)/i);
+          if (!plainMatch) {
+            // try without explicit : or - delimiter
+            plainMatch = prompt.match(/issue\s+(?:in|on)\s+([\w.-]+\/[\w.-]+)\s+(.+)/i);
+          }
+          if (!plainMatch) throw new Error('Format: owner/repo | title | [body]');
+          const titleBody = plainMatch[2].trim();
+          const split = titleBody.split(/[-–—]/);
+          const title = split[0].trim();
+          const bodyRest = split.slice(1).join('-').trim();
+          parts.length = 0;
+          parts.push(plainMatch[1].trim(), title, bodyRest);
+        }
+        const [repoRef, issueTitle, issueBody] = parts;
+        const matchRepo = repoRef.match(/([\w.-]+)\/([\w.-]+)/);
+        if (!matchRepo) throw new Error('First segment must be owner/repo');
+        const owner = matchRepo[1];
+        const repo  = matchRepo[2];
+        if (!owner || !repo) throw new Error('Repo must be owner/repo');
+        const { data } = await octokit.issues.create({ owner, repo, title: issueTitle, body: issueBody || '' });
+        return {
+          output: `✅ Issue created: ${data.html_url}`,
           provider: this.id,
           command,
-          raw_response: null
+          raw_response: data
         };
       }
       case 'generate-pr': {
-        return { 
-          output: 'PR creation feature is not yet implemented.',
-          tokens_used: null,
-          model_version: 'github-api-v3',
+        // Expect prompt: owner/repo | headBranch | baseBranch | title | body(optional)
+        const parts = prompt.replace(/^\s*\/github\s+generate-pr/i,'').split('|').map(p=>p.trim()).filter(Boolean);
+        if (parts.length < 4) {
+          const plain = prompt.match(/pr\s+from\s+(\S+)\s+into\s+(\S+)\s+on\s+([\w.-]+\/[\w.-]+)\s*[:\-]?\s*(.+)/i);
+          if (!plain) throw new Error('Format: owner/repo | head | base | title | [body]');
+          // plain[4] contains title+optional body separated by dash
+          const tb = plain[4].trim();
+          const s = tb.split(/[-–—]/);
+          const tTitle = s[0].trim();
+          const tBody = s.slice(1).join('-').trim();
+          parts.length=0;
+          parts.push(plain[3], plain[1], plain[2], tTitle, tBody);
+        }
+        const [repoRef, head, base, prTitle, prBody] = parts;
+        const [owner, repo] = repoRef.split('/');
+        if (!owner || !repo) throw new Error('Repo must be owner/repo');
+        const { data } = await octokit.pulls.create({ owner, repo, head, base, title: prTitle, body: prBody || '' });
+        return {
+          output: `✅ Pull request created: ${data.html_url}`,
           provider: this.id,
           command,
-          raw_response: null
+          raw_response: data
         };
       }
       default:
@@ -432,7 +492,11 @@ function requireAuth(req, res, next) {
 
 app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
   // Log only high-level details to avoid dumping full conversation to console
-  const { prompt, provider, command, apiKey } = req.body;
+  let { prompt, provider, command, apiKey } = req.body;
+  // Fallback: if no apiKey field provided use Bearer token from Authorization header
+  if (!apiKey && typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')) {
+    apiKey = req.headers.authorization.replace('Bearer ', '').trim();
+  }
   console.log('Received /api/command', { provider, command, promptLength: prompt?.length, hasApiKey: !!apiKey, msgCount: Array.isArray(req.body.messages) ? req.body.messages.length : 0 });
   let formattedPrompt = prompt;
 
@@ -456,6 +520,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
 
   try {
     if (provider === 'openai') {
+      console.log(`[MCP -> OpenAI] command=${command}`);
       const openaiApiKey = apiKey || process.env.OPENAI_API_KEY;
       if (!openaiApiKey) {
         return res.status(400).json({ error: 'No OpenAI API key provided.' });
@@ -471,18 +536,32 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         messagesToSend = messagesToSend.slice(-HISTORY_LIMIT);
       }
 
-      const completion = await openai.chat.completions.create({
-        model: 'gpt-3.5-turbo',
-        messages: messagesToSend,
-      });
-      return res.json({
-        output: completion.choices[0].message.content,
-        tokens_used: completion.usage.total_tokens,
-        model_version: 'gpt-3.5-turbo',
-        provider: 'openai',
-        raw_response: completion,
-      });
+      try {
+        const completion = await openai.chat.completions.create({
+          model: 'gpt-3.5-turbo',
+          messages: messagesToSend,
+          max_tokens: 1024,
+        });
+        return res.json({
+          output: completion.choices[0].message.content,
+          tokens_used: completion.usage.total_tokens,
+          model_version: 'gpt-3.5-turbo',
+          provider: 'openai',
+          raw_response: completion,
+        });
+      } catch (err) {
+        // Detect and surface rate-limit errors clearly so the UI can show an informative message
+        const message = err?.message || 'Unknown OpenAI error';
+        // OpenAI client exposes status via err.status, fall back to 429 keyword in message if absent
+        const status = err?.status || (message.includes('rate') && 429);
+        if (status === 429) {
+          return res.status(429).json({ error: 'OpenAI rate limit exceeded. Please wait a moment and try again.' });
+        }
+        // Otherwise bubble up generic error
+        return res.status(400).json({ error: message });
+      }
     } else if (provider === 'anthropic') {
+      console.log(`[MCP -> Anthropic] command=${command}`);
       const anthropicApiKey = apiKey || process.env.ANTHROPIC_API_KEY;
       if (!anthropicApiKey) {
         return res.status(400).json({ error: 'No Anthropic API key provided.' });
@@ -494,7 +573,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         role: m.role,
         content: m.content
       }));
-      const anthropicRes = await fetch('https://api.anthropic.com/v1/messages', {
+      const anthropicRes = await time('Anthropic API', () => fetch('https://api.anthropic.com/v1/messages', {
         method: 'POST',
         headers: {
           'x-api-key': anthropicApiKey,
@@ -506,7 +585,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
           max_tokens: 256,
           messages: claudeMessages
         })
-      });
+      }));
       if (!anthropicRes.ok) {
         const err = await anthropicRes.text();
         return res.status(400).json({ error: 'Anthropic API error', details: err });
@@ -522,6 +601,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         raw: data
       });
     } else if (provider === 'gemini' || provider === 'google') {
+      console.log(`[MCP -> Gemini] command=${command}`);
       const geminiApiKey = apiKey || process.env.GEMINI_API_KEY;
       if (!geminiApiKey) {
         throw new Error('No Gemini API key provided');
@@ -570,27 +650,33 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       const drive = google.drive({ version: 'v3', auth: authClient });
 
       try {
-        // Currently support a single command: list-files
-        if (command === 'list-files' || /list files/i.test(prompt)) {
+        if (command === 'list-files') {
+          console.log('[MCP -> Google Drive] list-files');
           const { data } = await drive.files.list({ pageSize: 100, fields: 'files(id, name, mimeType)' });
-          const files = (data.files || []).map(f => `${f.name} (${f.mimeType})`).join('\n');
-          return res.json({
-            output: files || 'No files found.',
-            tokens_used: null,
-            model_version: 'google-drive-v3',
-            provider: 'google_drive',
-            command: 'list-files',
-            raw_response: data
-          });
+          const files = (data.files || []).map(f => `${f.id} | ${f.name} (${f.mimeType})`).join('\n');
+          return res.json({ output: files || 'No files found.', provider: 'google_drive', command, raw_response: data });
+        } else if (command === 'search-files') {
+          const query = prompt || '';
+          console.log('[MCP -> Google Drive] search', query);
+          const { data } = await drive.files.list({ q: `name contains '${query.replace(/'/g, "\\'")}'`, pageSize: 50, fields: 'files(id, name, mimeType)' });
+          const out = (data.files || []).map(f => `${f.id} | ${f.name} (${f.mimeType})`).join('\n');
+          return res.json({ output: out || 'No matches.', provider: 'google_drive', command, raw_response: data });
+        } else if (command === 'download-file') {
+          const fileId = prompt.trim();
+          if (!fileId) throw new Error('Provide fileId in prompt');
+          const resp = await drive.files.get({ fileId, alt: 'media' }, { responseType: 'arraybuffer' });
+          const buffer = Buffer.from(resp.data);
+          const base64 = buffer.toString('base64');
+          return res.json({ output: base64, provider: 'google_drive', command, raw_response: { fileId, size: buffer.length } });
+        } else {
+          return res.status(400).json({ error: `Unsupported Google Drive command: ${command}` });
         }
-
-        // If command not recognized
-        return res.status(400).json({ error: `Unsupported Google Drive command: ${command}` });
       } catch (err) {
         console.error('[MCP Server] Google Drive error:', err.message);
         return res.status(400).json({ error: err.message });
       }
     } else if (provider === 'github') {
+      console.log(`[MCP -> GitHub] command=${command}`);
       try {
         // If no command specified (e.g. "Test token"), just validate the token
         if (!command || command === 'validate' || command === 'test-token') {
@@ -606,6 +692,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         return res.status(400).json({ success: false, error: err.message });
       }
     } else if (provider === 'zapier') {
+      console.log(`[MCP -> Zapier] command=${command}`);
       // Basic Zapier NLA support (https://nla.zapier.com/api/v1/)
       const zapierKey = apiKey || req.body?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : '');
       if (!zapierKey) {
@@ -669,6 +756,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         return res.status(400).json({ error: err.message });
       }
     } else if (provider === 'gmail') {
+      console.log(`[MCP -> Gmail] command=${command}`);
       // Determine access token: prefer Authorization header set earlier by requireAuth fallback, else session token
       const bearerToken = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : null;
       const accessToken = apiKey || bearerToken || (req.session.googleTokens?.access_token);
@@ -972,34 +1060,20 @@ app.post('/api/chat', upload.single('attachment'), async (req, res) => {
     }
   }
 
-  // Always define these before using or logging them!
-  // Use provider and apiKey from the request body if present
-  let provider = req.body.provider || 'openai';
-  let apiKey = req.body.apiKey || undefined;
-  let command = 'chat';
-  let prompt = message;
+  // 1) Start with explicit values from body (UI may send these)
+  let provider = req.body.provider || undefined;
+  let apiKey   = req.body.apiKey || undefined;
+  let command  = req.body.command || undefined;
+  let prompt   = message;
 
-  if (
-    /github.*repo|repo.*github/i.test(message) ||
-    /list.*repo/i.test(message) ||
-    /show.*repo/i.test(message) ||
-    /my.*repo/i.test(message)
-  ) {
-    provider = 'github';
-    command = 'list-repos';
-  } else if (/repo[- ]?summary/i.test(message)) {
-    provider = 'github';
-    command = 'repo-summary';
-  } else if (/code[- ]?search/i.test(message)) {
-    provider = 'github';
-    command = 'code-search';
-  } else if (/issue/i.test(message)) {
-    provider = 'github';
-    command = 'generate-issue';
-  } else if (/pull[- ]?request|pr/i.test(message)) {
-    provider = 'github';
-    command = 'generate-pr';
-  }
+  // 2) Let the shared parser suggest provider/command if not supplied
+  const intent = parseIntent(message);
+  if (!provider && intent.provider) provider = intent.provider;
+  if (!command && intent.command)   command  = intent.command;
+
+  // 3) Fallback defaults
+  provider = provider || 'openai';
+  command  = command  || 'chat';
 
   // If there's an attachment, use it as context
   if (attachmentContent) {
@@ -1253,6 +1327,18 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
+// NEW: plain "/health" alias for convenience and spec compatibility
+app.get('/health', (req, res) => {
+  res.json({ ok: true });
+});
+
+// NEW: "/commands" discovery endpoint (and /api/commands alias)
+app.get(['/commands', '/api/commands'], (req, res) => {
+  // Surface server version for clients via header
+  res.set('MCP-Server-Version', MCP_SERVER_VERSION);
+  res.json(MCP_COMMANDS);
+});
+
 // Helper to fetch single user row (id=1) or create if missing
 async function getOrCreateUser() {
   let user = await db.get('SELECT * FROM User LIMIT 1');
@@ -1424,5 +1510,57 @@ app.get('/mcp', (req, res) => {
     clearInterval(ping);
     console.log('[MCP] SSE client', req.ip, 'disconnected');
   });
+});
+
+// --- simple timing helper ---
+async function time(label, fn) {
+  const start = Date.now();
+  try {
+    const res = await fn();
+    const ms = Date.now() - start;
+    const status = res?.status ?? 'ok';
+    console.log(`[${label}] ${ms}ms status=${status}`);
+    return res;
+  } catch (err) {
+    console.log(`[${label}] ERROR after ${Date.now() - start}ms -> ${err.message}`);
+    throw err;
+  }
+}
+
+app.post('/api/validate-key', express.json(), async (req, res) => {
+  const { provider, apiKey } = req.body || {};
+  if (!provider || !apiKey) return res.status(400).json({ valid: false, error: 'Missing provider or apiKey' });
+  try {
+    if (provider === 'github') {
+      const octo = new Octokit({ auth: apiKey });
+      await octo.request('GET /user');
+      return res.json({ valid: true });
+    }
+    if (provider === 'openai') {
+      const resp = await fetch('https://api.openai.com/v1/models', {
+        headers: { Authorization: `Bearer ${apiKey}` }
+      });
+      return res.json({ valid: resp.ok });
+    }
+    if (provider === 'anthropic') {
+      const resp = await fetch('https://api.anthropic.com/v1/models', {
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+          'content-type': 'application/json'
+        },
+        method: 'GET'
+      });
+      return res.json({ valid: resp.ok });
+    }
+    if (provider === 'gemini' || provider === 'google' ) {
+      const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+      return res.json({ valid: resp.ok });
+    }
+    // Default: unknown provider
+    return res.status(400).json({ valid: false, error: 'Provider not supported' });
+  } catch (err) {
+    return res.json({ valid: false, error: err.message });
+  }
 });
 
