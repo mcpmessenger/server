@@ -1620,3 +1620,10 @@ app.post('/google/refresh', express.json(), async (req, res) => {
   }
 });
 
+// alias for compatibility
+app.post('/refresh', (req, res) => {
+  req.url = '/google/refresh';
+  // continue to existing route handler stack
+  app._router.handle(req, res);
+});
+
