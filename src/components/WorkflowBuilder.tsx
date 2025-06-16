@@ -1,5 +1,9 @@
 import React, { useState } from 'react';
 import { Provider, Command } from '../types';
+// @ts-ignore
+import mcp from '../services/mcpServerService.js';
+import { useJobPolling } from '../hooks/useJobPolling';
+import StepTracker, { StepInfo } from './StepTracker';
 
 interface WorkflowStep {
   provider: string;
@@ -29,6 +33,9 @@ export const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({
   const [stepResults, setStepResults] = useState<{ status: 'idle' | 'running' | 'success' | 'error'; output?: string }[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  const [jobId, setJobId] = useState<string>('');
+
+  const { job } = useJobPolling(jobId);
 
   const handleStepChange = (idx: number, field: keyof WorkflowStep, value: string) => {
     setSteps(prev => prev.map((step, i) => i === idx ? { ...step, [field]: value } : step));
@@ -46,16 +53,21 @@ export const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({
   const handleRun = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsRunning(true);
-    setStepResults(steps.map(() => ({ status: 'running' })));
     try {
-      await onRunWorkflow(steps, (idx, status, output) => {
-        setStepResults(prev => prev.map((r, i) => i === idx ? { status, output } : r));
-      });
-    } catch (err: any) {
-      setStepResults(steps.map(() => ({ status: 'error', output: err.message || 'Error' })));
+      const resp = await mcp.runWorkflow(steps, contextHistory[contextHistory.length-1]?.response || '');
+      setJobId(resp.jobId);
+    } catch(err:any){
+      alert(err.message || 'Workflow error');
     }
-    setIsRunning(false);
   };
+
+  const trackerSteps: StepInfo[] = (job?.results || []).map((r:any)=>({
+    provider: r.provider,
+    command: r.command,
+    status: r.status || (job.done? 'success':'running'),
+    output: r.output,
+    error: r.error
+  }));
 
   return (
     <div className="w-full bg-white/80 dark:bg-neutral-900 dark:border-neutral-700 rounded-xl p-6 border border-gray-200 shadow-lg">
@@ -150,6 +162,8 @@ export const WorkflowBuilder: React.FC<WorkflowBuilderProps> = ({
           </button>
         </div>
       </form>
+      {trackerSteps.length > 0 && <StepTracker steps={trackerSteps} className="mt-6" />}
+
       <div className="mt-8">
         <h3 className="text-md font-semibold mb-2">Context / History</h3>
         <div className="max-h-48 overflow-y-auto space-y-2">
