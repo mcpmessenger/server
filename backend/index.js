@@ -301,24 +301,48 @@ class GmailProviderPlugin extends ProviderPlugin {
 
     switch (cmd) {
       case 'list-messages': {
-        const { data } = await gmail.users.messages.list({ userId: 'me', maxResults: 20 });
-        return {
-          output: data.messages || [],
-          provider: this.id,
-          command: cmd,
-          raw_response: data
-        };
+        // First fetch message IDs (minimal)
+        const listRes = await gmail.users.messages.list({ userId: 'me', maxResults: 20 });
+        const msgs = listRes.data.messages || [];
+        // Fetch metadata headers for each message in parallel (but capped)
+        const detailed = await Promise.all(msgs.slice(0, 20).map(async (m) => {
+          try {
+            const meta = await gmail.users.messages.get({
+              userId: 'me',
+              id: m.id,
+              format: 'metadata',
+              metadataHeaders: ['Subject', 'From', 'Date']
+            });
+            const headers = (meta.data.payload?.headers || []).reduce((acc, h) => { acc[h.name.toLowerCase()] = h.value; return acc; }, {});
+            return {
+              id: meta.data.id,
+              threadId: meta.data.threadId,
+              subject: headers['subject'] || '',
+              from: headers['from'] || '',
+              date: headers['date'] || '',
+              snippet: meta.data.snippet || ''
+            };
+          } catch {
+            return { id: m.id };
+          }
+        }));
+        return { output: detailed, provider: this.id, command: cmd, raw_response: detailed };
       }
       case 'get-message': {
         const messageId = argString;
         if (!messageId) throw new Error('Prompt must contain Gmail message ID');
         const { data } = await gmail.users.messages.get({ userId: 'me', id: messageId, format: 'full' });
-        return {
-          output: data,
-          provider: this.id,
-          command: cmd,
-          raw_response: data
+        const headers = (data.payload?.headers || []).reduce((acc, h) => { acc[h.name.toLowerCase()] = h.value; return acc; }, {});
+        const simplified = {
+          id: data.id,
+          threadId: data.threadId,
+          subject: headers['subject'] || '',
+          from: headers['from'] || '',
+          date: headers['date'] || '',
+          snippet: data.snippet || '',
+          body: ((data.payload?.parts || []).find(p=>p.mimeType==='text/plain')?.body?.data) || ''
         };
+        return { output: simplified, provider: this.id, command: cmd, raw_response: data };
       }
       case 'send-email': {
         // Expect prompt as JSON: { to, subject, body }
