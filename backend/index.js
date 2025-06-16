@@ -14,6 +14,7 @@ import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import { jwtDecode } from "jwt-decode";
 import { parseIntent } from './parser.js';
+import crypto from 'crypto';
 
 dotenv.config();
 
@@ -771,97 +772,91 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
   }
 });
 
+// --- Asynchronous Workflow execution ---
+async function enqueueWorkflowJob(workflow, context = '') {
+  const jobId = 'wf-' + crypto.randomUUID();
+  const now = Date.now();
+  await db.run(
+    'INSERT INTO WorkflowJob (id, status, created, updated, workflow_json, context, results_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    jobId,
+    'queued',
+    now,
+    now,
+    JSON.stringify(workflow),
+    context,
+    JSON.stringify([])
+  );
+
+  // Start async processing without blocking response
+  process.nextTick(() => processWorkflowJob(jobId));
+
+  return jobId;
+}
+
+async function processWorkflowJob(jobId) {
+  let job = await db.get('SELECT * FROM WorkflowJob WHERE id = ?', jobId);
+  if (!job) return;
+  let workflow = JSON.parse(job.workflow_json);
+  let results = [];
+  let lastOutput = job.context || '';
+
+  await db.run('UPDATE WorkflowJob SET status = ? WHERE id = ?', 'running', jobId);
+
+  for (let idx = 0; idx < workflow.length; idx++) {
+    const step = workflow[idx];
+    const { provider, command, prompt, apiKey } = step;
+    const stepPrompt = prompt || lastOutput;
+
+    try {
+      // Proxy to existing /api/command route so we reuse all provider logic
+      const resp = await fetch(`http://localhost:${PORT}/api/command`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: stepPrompt, provider, command, apiKey })
+      });
+      const data = await resp.json();
+      if (!resp.ok || data.error) {
+        throw new Error(data.error || `HTTP ${resp.status}`);
+      }
+      results.push({ status: 'success', output: data.output, provider, command });
+      lastOutput = data.output;
+    } catch (err) {
+      results.push({ status: 'error', error: err.message, provider, command });
+      // Decide whether to stop on error or continue; here we stop.
+      break;
+    }
+
+    await db.run('UPDATE WorkflowJob SET results_json = ?, updated = ? WHERE id = ?', JSON.stringify(results), Date.now(), jobId);
+  }
+
+  await db.run('UPDATE WorkflowJob SET status = ?, results_json = ?, updated = ? WHERE id = ?', 'done', JSON.stringify(results), Date.now(), jobId);
+}
+
 app.post('/api/workflow', async (req, res) => {
   const { workflow, context } = req.body;
   if (!Array.isArray(workflow) || workflow.length === 0) {
     return res.status(400).json({ error: 'Workflow must be a non-empty array.' });
   }
-  let lastOutput = context || '';
-  const results = [];
-  for (const step of workflow) {
-    const { provider, command, prompt, apiKey } = step;
-    let stepPrompt = prompt || lastOutput;
-    let formattedPrompt = stepPrompt;
-    switch (command) {
-      case 'summarize':
-        formattedPrompt = `Summarize this:\n${stepPrompt}`;
-        break;
-      case 'generate-code':
-        formattedPrompt = `Write code for:\n${stepPrompt}`;
-        break;
-      case 'explain':
-        formattedPrompt = `Explain this:\n${stepPrompt}`;
-        break;
-      case 'translate':
-        formattedPrompt = `Translate this to English:\n${stepPrompt}`;
-        break;
-      default:
-        break;
-    }
-    try {
-      let result;
-      if (provider === 'openai') {
-        const openaiApiKey = apiKey || process.env.OPENAI_API_KEY;
-        if (!openaiApiKey) throw new Error('No OpenAI API key provided.');
-        const openai = new OpenAI({ apiKey: openaiApiKey });
-        const completion = await openai.chat.completions.create({
-          model: 'gpt-3.5-turbo',
-          messages: [{ role: 'user', content: formattedPrompt }],
-        });
-        result = {
-          output: completion.choices[0].message.content,
-          tokens_used: completion.usage.total_tokens,
-          model_version: 'gpt-3.5-turbo',
-          provider: 'openai',
-          command,
-          raw_response: completion,
-        };
-      } else if (provider === 'anthropic') {
-        const anthropicApiKey = apiKey || process.env.ANTHROPIC_API_KEY;
-        if (!anthropicApiKey) throw new Error('No Anthropic API key provided.');
-        const anthropic = new Anthropic({ apiKey: anthropicApiKey });
-        const completion = await anthropic.messages.create({
-          model: 'claude-3-sonnet-20240229',
-          max_tokens: 1024,
-          messages: [
-            { role: 'user', content: formattedPrompt }
-          ],
-        });
-        result = {
-          output: completion.content[0].text,
-          tokens_used: completion.usage.input_tokens + completion.usage.output_tokens,
-          model_version: 'claude-3-sonnet-20240229',
-          provider: 'anthropic',
-          command,
-          raw_response: completion,
-        };
-      } else if (provider === 'gemini') {
-        const geminiApiKey = apiKey || process.env.GEMINI_API_KEY;
-        if (!geminiApiKey) throw new Error('No Gemini API key provided.');
-        const genAI = new GoogleGenerativeAI(geminiApiKey);
-        const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
-        const resultGemini = await model.generateContent(formattedPrompt);
-        const response = await resultGemini.response;
-        const text = response.text();
-        result = {
-          output: text,
-          tokens_used: null,
-          model_version: 'gemini-2.0-flash',
-          provider: 'gemini',
-          command,
-          raw_response: response,
-        };
-      } else {
-        throw new Error('Unsupported provider');
-      }
-      results.push(result);
-      lastOutput = result.output;
-    } catch (err) {
-      results.push({ error: err.message, provider, command });
-      lastOutput = '';
-    }
+  try {
+    const jobId = await enqueueWorkflowJob(workflow, context);
+    res.json({ jobId, eta: workflow.length * 10 }); // naive ETA: 10s per step
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json({ results });
+});
+
+app.get('/api/job/:id', async (req, res) => {
+  const { id } = req.params;
+  const job = await db.get('SELECT * FROM WorkflowJob WHERE id = ?', id);
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  res.json({
+    jobId: job.id,
+    status: job.status,
+    created: job.created,
+    updated: job.updated,
+    done: job.status === 'done',
+    results: JSON.parse(job.results_json || '[]')
+  });
 });
 
 app.get('/api/google/drive-files', async (req, res) => {
@@ -1223,6 +1218,15 @@ let db;
       url TEXT,
       type TEXT,
       secret TEXT
+    );
+    CREATE TABLE IF NOT EXISTS WorkflowJob (
+      id TEXT PRIMARY KEY,
+      status TEXT,
+      created INTEGER,
+      updated INTEGER,
+      workflow_json TEXT,
+      context TEXT,
+      results_json TEXT
     );
   `);
 })();
