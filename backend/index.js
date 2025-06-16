@@ -1592,3 +1592,31 @@ app.post('/api/validate-key', express.json(), async (req, res) => {
   }
 });
 
+// --- Google OAuth token refresh endpoint ---
+app.post('/google/refresh', express.json(), async (req, res) => {
+  const { refresh_token } = req.body;
+  if (!refresh_token) return res.status(400).json({ error: 'Missing refresh_token' });
+  try {
+    const params = new URLSearchParams({
+      client_id: process.env.GOOGLE_CLIENT_ID,
+      client_secret: process.env.GOOGLE_CLIENT_SECRET,
+      grant_type: 'refresh_token',
+      refresh_token
+    });
+    const tokenRes = await fetch('https://oauth2.googleapis.com/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: params.toString()
+    });
+    if (!tokenRes.ok) {
+      const text = await tokenRes.text();
+      return res.status(401).json({ error: 'refresh_failed', details: text });
+    }
+    const json = await tokenRes.json(); // { access_token, expires_in, scope, token_type }
+    return res.json({ access_token: json.access_token, expires_in: json.expires_in });
+  } catch (err) {
+    console.error('Google refresh error', err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
