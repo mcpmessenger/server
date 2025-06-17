@@ -84,6 +84,7 @@ const MCP_COMMANDS = [
   { id: 'search-files',  name: 'Search Drive Files',    description: 'Search Google Drive files', providers: ['google_drive'] },
   { id: 'download-file', name: 'Download Drive File',   description: 'Download file content from Drive', providers: ['google_drive'] },
   { id: 'upload-file',   name: 'Upload Drive File',     description: 'Upload a new file to Drive', providers: ['google_drive'] },
+  { id: 'list-events', name: 'List Calendar Events', description: 'List today\'s Google Calendar events', providers: ['google_calendar'] },
 ];
 
 // After the MCP_COMMANDS array is declared, insert the server version constant
@@ -504,7 +505,7 @@ async function getGoogleAuthFromSession(req) {
 // --- Bearer token auth middleware for Google Drive commands ---
 function requireAuth(req, res, next) {
   // Only enforce auth for Google Drive commands
-  if (req.body?.provider !== 'google_drive') {
+  if (!['google_drive','google_calendar'].includes(req.body?.provider)) {
     return next();
   }
   const auth = req.headers.authorization || '';
@@ -700,6 +701,38 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         console.error('[MCP Server] Google Drive error:', err.message);
         return res.status(400).json({ error: err.message });
       }
+    } else if (provider === 'google_calendar') {
+      const googleToken = req.googleToken;
+      if (!googleToken) {
+        return res.status(401).json({ error: 'Missing Google OAuth token' });
+      }
+      const authClient = new google.auth.OAuth2();
+      authClient.setCredentials({ access_token: googleToken });
+      const calendar = google.calendar({ version: 'v3', auth: authClient });
+      try {
+        if (command === 'list-events' || /list.*events/i.test(command || formattedPrompt)) {
+          const today = new Date();
+          const isoDate = today.toISOString().split('T')[0];
+          const timeMin = `${isoDate}T00:00:00Z`;
+          const timeMax = `${isoDate}T23:59:59Z`;
+          const { data } = await calendar.events.list({
+            calendarId: 'primary',
+            timeMin,
+            timeMax,
+            singleEvents: true,
+            orderBy: 'startTime'
+          });
+          const summary = (data.items || []).map(ev => {
+            const start = ev.start?.dateTime || ev.start?.date;
+            return `${start} | ${ev.summary}`;
+          }).join('\n');
+          return res.json({ output: summary || 'No events today.', provider: 'google_calendar', command: 'list-events', raw_response: data });
+        }
+        return res.status(400).json({ error: `Unsupported Google Calendar command: ${command}` });
+      } catch (err) {
+        console.error('[MCP Server] Google Calendar error:', err.message);
+        return res.status(400).json({ error: err.message });
+      }
     } else if (provider === 'github') {
       console.log(`[MCP -> GitHub] command=${command}`);
       try {
@@ -793,343 +826,6 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
     }
   } catch (err) {
     res.status(500).json({ error: err.message });
-  }
-});
-
-// --- Asynchronous Workflow execution ---
-async function enqueueWorkflowJob(workflow, context = '') {
-  const jobId = 'wf-' + crypto.randomUUID();
-  const now = Date.now();
-  await db.run(
-    'INSERT INTO WorkflowJob (id, status, created, updated, workflow_json, context, results_json) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    jobId,
-    'queued',
-    now,
-    now,
-    JSON.stringify(workflow),
-    context,
-    JSON.stringify([])
-  );
-
-  // Start async processing without blocking response
-  process.nextTick(() => processWorkflowJob(jobId));
-
-  return jobId;
-}
-
-async function processWorkflowJob(jobId) {
-  let job = await db.get('SELECT * FROM WorkflowJob WHERE id = ?', jobId);
-  if (!job) return;
-  let workflow = JSON.parse(job.workflow_json);
-  let results = [];
-  let lastOutput = job.context || '';
-
-  await db.run('UPDATE WorkflowJob SET status = ? WHERE id = ?', 'running', jobId);
-
-  for (let idx = 0; idx < workflow.length; idx++) {
-    const step = workflow[idx];
-    const { provider, command, prompt, apiKey } = step;
-    const stepPrompt = prompt || lastOutput;
-
-    try {
-      // Proxy to existing /api/command route so we reuse all provider logic
-      const resp = await fetch(`http://localhost:${PORT}/api/command`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: stepPrompt, provider, command, apiKey })
-      });
-      const data = await resp.json();
-      if (!resp.ok || data.error) {
-        throw new Error(data.error || `HTTP ${resp.status}`);
-      }
-      results.push({ status: 'success', output: data.output, provider, command });
-      lastOutput = data.output;
-    } catch (err) {
-      results.push({ status: 'error', error: err.message, provider, command });
-      // Decide whether to stop on error or continue; here we stop.
-      break;
-    }
-
-    await db.run('UPDATE WorkflowJob SET results_json = ?, updated = ? WHERE id = ?', JSON.stringify(results), Date.now(), jobId);
-  }
-
-  await db.run('UPDATE WorkflowJob SET status = ?, results_json = ?, updated = ? WHERE id = ?', 'done', JSON.stringify(results), Date.now(), jobId);
-}
-
-app.post('/api/workflow', async (req, res) => {
-  const { workflow, context } = req.body;
-  if (!Array.isArray(workflow) || workflow.length === 0) {
-    return res.status(400).json({ error: 'Workflow must be a non-empty array.' });
-  }
-  try {
-    const jobId = await enqueueWorkflowJob(workflow, context);
-    res.json({ jobId, eta: workflow.length * 10 }); // naive ETA: 10s per step
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/job/:id', async (req, res) => {
-  const { id } = req.params;
-  const job = await db.get('SELECT * FROM WorkflowJob WHERE id = ?', id);
-  if (!job) return res.status(404).json({ error: 'Job not found' });
-  res.json({
-    jobId: job.id,
-    status: job.status,
-    created: job.created,
-    updated: job.updated,
-    done: job.status === 'done',
-    results: JSON.parse(job.results_json || '[]')
-  });
-});
-
-app.get('/api/google/drive-files', async (req, res) => {
-  const auth = await getGoogleAuthFromSession(req);
-  if (!auth) return res.status(401).json({ error: 'Not authenticated with Google' });
-  const drive = google.drive({ version: 'v3', auth });
-  const files = await drive.files.list({ pageSize: 20, fields: 'files(id, name, mimeType)' });
-  res.json({ files: files.data.files });
-});
-
-app.get('/api/google/gmail-messages', async (req, res) => {
-  const auth = await getGoogleAuthFromSession(req);
-  if (!auth) return res.status(401).json({ error: 'Not authenticated with Google' });
-  const gmail = google.gmail({ version: 'v1', auth });
-  const messages = await gmail.users.messages.list({ userId: 'me', maxResults: 20 });
-  res.json({ messages: messages.data.messages });
-});
-
-app.get('/api/google/status', (req, res) => {
-  if (req.session.googleTokens) {
-    res.json({ connected: true });
-  } else {
-    res.json({ connected: false });
-  }
-});
-
-app.get('/auth/github', (req, res) => {
-  const url = `https://github.com/login/oauth/authorize?client_id=${GITHUB_CLIENT_ID}&redirect_uri=${encodeURIComponent(GITHUB_CALLBACK)}&scope=repo%20read:user`;
-  res.redirect(url);
-});
-
-app.get('/auth/github/callback', async (req, res) => {
-  const code = req.query.code;
-  const tokenRes = await fetch('https://github.com/login/oauth/access_token', {
-    method: 'POST',
-    headers: { 'Accept': 'application/json' },
-    body: JSON.stringify({
-      client_id: GITHUB_CLIENT_ID,
-      client_secret: GITHUB_CLIENT_SECRET,
-      code,
-      redirect_uri: GITHUB_CALLBACK
-    })
-  });
-  const tokenData = await tokenRes.json();
-  console.log('GitHub tokenData:', tokenData);
-  req.session.githubToken = tokenData.access_token;
-
-  // Fetch GitHub user info
-  const userRes = await fetch('https://api.github.com/user', {
-    headers: { Authorization: `token ${tokenData.access_token}` }
-  });
-  const userData = await userRes.json();
-  console.log('GitHub userData:', userData);
-  const githubId = userData.id?.toString();
-  if (!githubId) return res.status(400).send('Could not get GitHub user ID');
-
-  // Upsert user in SQLite
-  let user = await db.get('SELECT * FROM User WHERE githubId = ?', githubId);
-  if (!user) {
-    const result = await db.run('INSERT INTO User (githubId) VALUES (?)', githubId);
-    user = await db.get('SELECT * FROM User WHERE id = ?', result.lastID);
-  }
-  req.session.userId = user.id;
-
-  res.redirect('http://localhost:5174/');
-});
-
-function getGitHubOctokitFromSession(req) {
-  if (!req.session.githubToken) return null;
-  return new Octokit({ auth: req.session.githubToken });
-}
-
-app.get('/api/github/repos', async (req, res) => {
-  const octokit = getGitHubOctokitFromSession(req);
-  if (!octokit) {
-    console.error('Not authenticated with GitHub (no Octokit instance)');
-    return res.status(401).json({ error: 'Not authenticated with GitHub' });
-  }
-  let allRepos = [];
-  let page = 1;
-  let fetched;
-  try {
-    do {
-      const { data } = await octokit.repos.listForAuthenticatedUser({ per_page: 100, page });
-      fetched = data.length;
-      allRepos = allRepos.concat(data);
-      page++;
-    } while (fetched === 100);
-    res.json({ repos: allRepos });
-  } catch (err) {
-    console.error('Error fetching GitHub repos:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.get('/api/github/files', async (req, res) => {
-  const octokit = getGitHubOctokitFromSession(req);
-  const { owner, repo, path } = req.query;
-  if (!octokit) return res.status(401).json({ error: 'Not authenticated with GitHub' });
-  if (!owner || !repo) return res.status(400).json({ error: 'Missing owner or repo' });
-  const { data } = await octokit.repos.getContent({ owner, repo, path: path || '' });
-  res.json({ files: data });
-});
-
-app.get('/api/github/status', (req, res) => {
-  if (req.session.githubToken) {
-    res.json({ connected: true });
-  } else {
-    res.json({ connected: false });
-  }
-});
-
-app.post('/api/github/disconnect', (req, res) => {
-  req.session.githubToken = undefined;
-  res.json({ disconnected: true });
-});
-
-const upload = multer({ dest: 'uploads/' });
-
-// --- Smart Chat Endpoint ---
-app.post('/api/chat', upload.single('attachment'), async (req, res) => {
-  const message = req.body.message;
-  const history = req.body.history ? JSON.parse(req.body.history) : [];
-  let attachmentContent = '';
-  if (req.file) {
-    attachmentContent = fs.readFileSync(req.file.path, 'utf-8');
-    fs.unlinkSync(req.file.path); // Clean up temp file
-  }
-
-  // Multi-webhook Zapier intent parsing
-  const zapierPattern = /^\s*\/zapier(?::([\w-]+))?/i;
-  const zapierMatch = message.match(zapierPattern);
-  if (zapierMatch) {
-    const hookName = zapierMatch[1];
-    try {
-      let userId = req.session.userId;
-      if (!userId) {
-        const user = await db.get('SELECT id FROM User LIMIT 1');
-        if (user) userId = user.id;
-      }
-      let webhook = null;
-      if (hookName) {
-        webhook = await db.get('SELECT * FROM Webhook WHERE userId = ? AND name = ?', userId, hookName);
-      } else {
-        webhook = await db.get('SELECT * FROM Webhook WHERE userId = ? LIMIT 1', userId);
-      }
-      if (!webhook) return res.json({ response: 'No Zapier webhook found. Please add one in settings.' });
-      let payloadText = message.replace(zapierPattern, '').trim();
-      let payload;
-      try {
-        payload = payloadText ? JSON.parse(payloadText) : { message, history, attachmentContent };
-      } catch (e) {
-        payload = { message: payloadText || message, history, attachmentContent };
-      }
-      console.log('Sending to Zapier:', webhook.url, payload);
-      const zapierResult = await sendToWebhook(webhook.url, payload, webhook.secret);
-      if (zapierResult && !zapierResult.error) {
-        return res.json({ response: '✅ Sent to Zapier webhook successfully!' });
-      } else {
-        return res.json({ response: '❌ Failed to send to Zapier webhook: ' + (zapierResult.error || 'Unknown error') });
-      }
-    } catch (err) {
-      console.error('Zapier integration error:', err);
-      return res.json({ response: '❌ Error sending to Zapier: ' + err.message });
-    }
-  }
-
-  // n8n intent parsing (returns early if handled)
-  const n8nPattern = /^\s*(\/n8n\b|send (this|it)? to n8n|trigger n8n|n8n:)/i;
-  if (n8nPattern.test(message)) {
-    try {
-      let user = null;
-      if (req.session.userId) {
-        user = await db.get('SELECT n8nUrl, n8nSecret FROM User WHERE id = ?', req.session.userId);
-      } else {
-        user = await db.get('SELECT n8nUrl, n8nSecret FROM User LIMIT 1');
-      }
-      if (!user || !user.n8nUrl) return res.json({ response: 'No n8n webhook URL found. Please set it in settings.' });
-      let payloadText = message.replace(n8nPattern, '').trim();
-      let payload;
-      try {
-        payload = payloadText ? JSON.parse(payloadText) : { message, history, attachmentContent };
-      } catch (e) {
-        payload = { message: payloadText || message, history, attachmentContent };
-      }
-      console.log('Sending to n8n:', user.n8nUrl, payload);
-      const n8nResult = await sendToWebhook(user.n8nUrl, payload, user.n8nSecret);
-      if (n8nResult && !n8nResult.error) {
-        return res.json({ response: '✅ Sent to n8n webhook successfully!' });
-      } else {
-        return res.json({ response: '❌ Failed to send to n8n webhook: ' + (n8nResult.error || 'Unknown error') });
-      }
-    } catch (err) {
-      console.error('n8n integration error:', err);
-      return res.json({ response: '❌ Error sending to n8n: ' + err.message });
-    }
-  }
-
-  // 1) Start with explicit values from body (UI may send these)
-  let provider = req.body.provider || undefined;
-  let apiKey   = req.body.apiKey || undefined;
-  let command  = req.body.command || undefined;
-  let prompt   = message;
-
-  // 2) Let the shared parser suggest provider/command if not supplied
-  const intent = parseIntent(message);
-  if (!provider && intent.provider) provider = intent.provider;
-  if (!command && intent.command)   command  = intent.command;
-
-  // 3) Fallback defaults
-  provider = provider || 'openai';
-  command  = command  || 'chat';
-
-  // If there's an attachment, use it as context
-  if (attachmentContent) {
-    prompt += '\n\nAttached file:\n' + attachmentContent;
-  }
-
-  // Only log after provider/command are set
-  console.log('Routing:', { provider, command, prompt });
-
-  try {
-    if (provider === 'github' && command === 'list-repos') {
-      // Call the /api/command endpoint, which supports PATs
-      const result = await fetch('http://localhost:3001/api/command', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, provider, command, apiKey }),
-      });
-      const data = await result.json();
-      if (data.output) {
-        return res.json({ response: data.output });
-      } else {
-        console.error('Could not fetch GitHub repositories. Response:', data);
-        return res.json({ response: 'Could not fetch GitHub repositories.' });
-      }
-    }
-
-    // Call the existing /api/command logic
-    const result = await fetch('http://localhost:3001/api/command', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ prompt, provider, command, apiKey }),
-    });
-    const data = await result.json();
-    res.json({ response: data.output });
-  } catch (err) {
-    console.error('Error in /api/chat endpoint:', err);
-    res.status(500).json({ response: 'Error: ' + err.message });
   }
 });
 
