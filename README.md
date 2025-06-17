@@ -1,4 +1,4 @@
-# MCP Server – Technical Product Requirements Document (PRD)
+# Slash / MCP Server – Technical Product Requirements Document (PRD)
 
 ## Quick Command Cheat-Sheet  
 Natural-language phrases that MCP's Smart Chat can understand today. Use the words **then**, **and**, **and then**, a period, or a semicolon to chain steps—the parser will split them automatically.
@@ -117,7 +117,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 
 ---
 
-# MCP Server
+# Slash / MCP Server
 
 ## Product Requirements Document (PRD)
 

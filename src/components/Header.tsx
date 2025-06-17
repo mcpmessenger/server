@@ -45,7 +45,7 @@ export const Header: React.FC<{
                 <Activity className="w-6 h-6 text-white" />
               </div>
               <div>
-                <h1 className="text-xl font-bold text-gray-900 dark:text-white">MCP Server</h1>
+                <h1 className="text-xl font-bold text-gray-900 dark:text-white">Slash / MCP Server</h1>
                 <p className="text-sm text-gray-500 dark:text-gray-300">Model Context Protocol</p>
               </div>
             </div>
