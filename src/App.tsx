@@ -10,7 +10,7 @@ import { WorkflowBuilder } from './components/WorkflowBuilder';
 import { GoogleConnect } from './components/GoogleConnect';
 import { GitHubConnect } from './components/GitHubConnect';
 import { SmartChat } from './components/SmartChat';
-import { SettingsModal } from './components/SettingsModal';
+import { SettingsModalNew as SettingsModal } from './components/SettingsModalNew';
 import { CommandList } from './components/CommandList';
 import { ChromeGrid } from './components/ui/chrome-grid';
 import { MessageCircle, Bot, Zap, Sparkles, Github, Globe } from 'lucide-react';
@@ -23,7 +23,7 @@ interface WorkflowStep {
 }
 
 function App() {
-  const { providers, setApiKey, updateProvider } = useProviders();
+  const { providers, setApiKey, updateProvider, setStatus } = useProviders();
   const { commands } = useCommands();
   const { requests, loading, executeCommand, clearHistory } = useMCPRequests();
   const [contextHistory, setContextHistory] = useState<{ prompt: string; response: string }[]>([]);
@@ -31,6 +31,8 @@ function App() {
   const [showCommands, setShowCommands] = useState(false);
   const [chatInput, setChatInput] = useState('');
   const [chatMinimized, setChatMinimized] = useState(false);
+  // Global ticker showing last command executed
+  const [ticker, setTicker] = useState<string>('');
 
   // Move dark mode state to be passed to Header
   const [darkMode, setDarkMode] = useState(() => {
@@ -49,6 +51,12 @@ function App() {
       localStorage.setItem('mcp-dark-mode', 'false');
     }
   }, [darkMode]);
+
+  useEffect(() => {
+    const handler = (e: any) => setTicker(e.detail as string);
+    window.addEventListener('mcp-run', handler);
+    return () => window.removeEventListener('mcp-run', handler);
+  }, []);
 
   const handleExecuteCommand = async (prompt: string, provider: string, apiKey: string, command: string) => {
     await executeCommand(prompt, provider, apiKey, command);
@@ -179,7 +187,7 @@ function App() {
             onClose={() => setShowSettings(false)}
             providers={providers}
             onSetApiKey={setApiKey}
-            onShowCommands={() => { setShowSettings(false); setShowCommands(true); }}
+            onSetStatus={setStatus}
           />
           <CommandList
             open={showCommands}
@@ -188,6 +196,12 @@ function App() {
             onClose={() => setShowCommands(false)}
           />
         </div>
+        {/* Ticker overlay */}
+        {ticker && (
+          <div className="fixed bottom-5 right-6 z-50 bg-black/80 text-white text-xs px-3 py-1 rounded shadow-lg pointer-events-none select-none">
+            {ticker}
+          </div>
+        )}
       </div>
     </div>
   );

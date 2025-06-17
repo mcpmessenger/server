@@ -1,5 +1,33 @@
 # MCP Server – Technical Product Requirements Document (PRD)
 
+## Quick Command Cheat-Sheet  
+Natural-language phrases that MCP's Smart Chat can understand today. Use the words **then**, **and**, **and then**, a period, or a semicolon to chain steps—the parser will split them automatically.
+
+### Single-step Examples
+- "Summarize this article"
+- "Translate the above summary to French"
+- "Explain this code snippet"
+- "Generate a unit test for this function"
+- "List my last 5 GitHub repos"
+- "Get README.md from sentilabs01/alexa"
+- "Send email to john@example.com — Subject: Hello — Body: Here's the weekly report"
+- "List Google Drive files in folder Docs"
+
+### Multi-step / Chained Examples
+- "List my last 2 GitHub repos then summarize the most active one"
+- "Get README of sentilabs01/alexa; summarize it; generate an issue titled 'Documentation improvements' in the same repo"
+- "Fetch today's Gmail inbox, summarize messages, and translate the summary to Spanish"
+- "List files in Google Drive folder Docs and summarize each one"
+- "Extract text from the attached image then run sentiment analysis"
+- "Summarize this PDF and email the summary to my team"
+- "Translate the attached CSV to Japanese and upload it back to Google Drive"
+- "List AI-enabled Zaps and trigger Zap 12345"
+- "Run code search for 'useEffect cleanup' in sentilabs01/alexa then summarize the findings"
+
+These are simply **suggestions**—the intent parser is purposefully lenient, so feel free to phrase commands naturally. If a step maps to an integration (GitHub, Gmail, Google Drive, Zapier, etc.) MCP routes it automatically; otherwise it treats it as an AI prompt.
+
+---
+
 ## 1. Vision
 A unified backend service for the Model Context Protocol (MCP), enabling API-driven, multi-provider AI and automation command execution, workflow chaining, and seamless integration with services like GitHub and Google. MCP Server acts as the core engine for orchestrating commands and workflows across apps and protocols.
 

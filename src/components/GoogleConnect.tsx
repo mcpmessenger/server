@@ -20,6 +20,7 @@ export const GoogleConnect: React.FC<GoogleConnectProps> = ({ onInsert }) => {
     setLoading(true);
     const res = await fetch('http://localhost:3001/api/google/drive-files', { credentials: 'include' });
     const data = await res.json();
+    const repoLines = data.slice(0, limit).map(r => `• ${r.full_name}`).join('\n');
     setDriveFiles(data.files || []);
     setLoading(false);
   };

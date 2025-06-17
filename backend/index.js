@@ -15,6 +15,10 @@ import { open } from 'sqlite';
 import { jwtDecode } from "jwt-decode";
 import { parseIntent } from './parser.js';
 import crypto from 'crypto';
+import cursorProvider from './providers/cursor.js';
+import twentyFirstDevProvider from './providers/twentyFirstDev.js';
+import loveableProvider from './providers/loveable.js';
+import boltProvider from './providers/bolt.js';
 
 dotenv.config();
 
@@ -85,6 +89,13 @@ const MCP_COMMANDS = [
   { id: 'download-file', name: 'Download Drive File',   description: 'Download file content from Drive', providers: ['google_drive'] },
   { id: 'upload-file',   name: 'Upload Drive File',     description: 'Upload a new file to Drive', providers: ['google_drive'] },
   { id: 'list-events', name: 'List Calendar Events', description: 'List today\'s Google Calendar events', providers: ['google_calendar'] },
+  { id: 'generate-ui-component', name: 'Generate UI Component', description: 'Generate front-end UI component code', providers: ['21st_dev'] },
+  { id: 'create-project', name: 'Create Project', description: 'Create a Supabase project via Loveable', providers: ['loveable'] },
+  { id: 'manage-database', name: 'Manage Database', description: 'Run database operations', providers: ['loveable'] },
+  { id: 'deploy', name: 'Deploy', description: 'Deploy project via Loveable', providers: ['loveable'] },
+  { id: 'web-search', name: 'Web Search', description: 'Perform a web search via Bolt', providers: ['bolt'] },
+  { id: 'figma-action', name: 'Figma Action', description: 'Interact with Figma via Bolt', providers: ['bolt'] },
+  { id: 'custom-tool', name: 'Custom Tool', description: 'Run a custom Bolt tool', providers: ['bolt'] },
 ];
 
 // After the MCP_COMMANDS array is declared, insert the server version constant
@@ -406,6 +417,30 @@ app.get('/api/providers', (req, res) => {
       requiresApiKey: true
     },
     {
+      id: cursorProvider.id,
+      name: cursorProvider.name,
+      supportedCommands: cursorProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
+      id: twentyFirstDevProvider.id,
+      name: twentyFirstDevProvider.name,
+      supportedCommands: twentyFirstDevProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
+      id: loveableProvider.id,
+      name: loveableProvider.name,
+      supportedCommands: loveableProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
+      id: boltProvider.id,
+      name: boltProvider.name,
+      supportedCommands: boltProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
       id: githubProviderPlugin.id,
       name: githubProviderPlugin.name,
       supportedCommands: githubProviderPlugin.supportedCommands,
@@ -432,6 +467,18 @@ app.get('/api/providers/:providerId/resources', async (req, res) => {
       res.json({ resources });
     } else if (providerId === 'gmail') {
       const resources = await gmailProviderPlugin.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'cursor') {
+      const resources = await cursorProvider.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === '21st_dev') {
+      const resources = await twentyFirstDevProvider.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'loveable') {
+      const resources = await loveableProvider.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'bolt') {
+      const resources = await boltProvider.listResources({ apiKey });
       res.json({ resources });
     } else {
       res.status(400).json({ error: 'Provider does not support resource listing' });
@@ -820,6 +867,22 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       const accessToken = apiKey || bearerToken || (req.session.googleTokens?.access_token);
 
       const result = await gmailProviderPlugin.executeCommand({ command, prompt: formattedPrompt, apiKey: accessToken });
+      return res.json(result);
+    } else if (provider === 'cursor') {
+      console.log(`[MCP -> Cursor] command=${command}`);
+      const result = await cursorProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
+      return res.json(result);
+    } else if (provider === '21st_dev') {
+      console.log(`[MCP -> 21st DEV] command=${command}`);
+      const result = await twentyFirstDevProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
+      return res.json(result);
+    } else if (provider === 'loveable') {
+      console.log(`[MCP -> Loveable] command=${command}`);
+      const result = await loveableProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
+      return res.json(result);
+    } else if (provider === 'bolt') {
+      console.log(`[MCP -> Bolt] command=${command}`);
+      const result = await boltProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
       return res.json(result);
     } else {
       return res.status(400).json({ error: 'Unsupported provider' });
@@ -1280,6 +1343,12 @@ app.post('/api/validate-key', express.json(), async (req, res) => {
     if (provider === 'gemini' || provider === 'google' ) {
       const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
       return res.json({ valid: resp.ok });
+    }
+    if (provider === 'cursor' || provider === '21st_dev' || provider === 'loveable' || provider === 'bolt') {
+      // TODO: Implement real validation once provider APIs are available.
+      // For now, treat any non-empty key as valid.
+      const valid = typeof apiKey === 'string' && apiKey.trim().length > 0;
+      return res.json({ valid });
     }
     // Default: unknown provider
     return res.status(400).json({ valid: false, error: 'Provider not supported' });
