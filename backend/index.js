@@ -15,12 +15,22 @@ import { open } from 'sqlite';
 import { jwtDecode } from "jwt-decode";
 import { parseIntent } from './parser.js';
 import crypto from 'crypto';
+import cursorProvider from './providers/cursor.js';
+import twentyFirstDevProvider from './providers/twentyFirstDev.js';
+import loveableProvider from './providers/loveable.js';
+import boltProvider from './providers/bolt.js';
 
 dotenv.config();
 
 const app = express();
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5176', 'http://localhost:5177'],
+  origin: (origin, callback) => {
+    const allowList = (process.env.CORS_ORIGINS || 'http://localhost:5173').split(',').map(o => o.trim());
+    if (!origin || allowList.includes(origin)) {
+      return callback(null, true);
+    }
+    callback(new Error('Origin not allowed by CORS'));
+  },
   credentials: true
 }));
 app.use(bodyParser.json({ limit: '10mb' }));
@@ -37,22 +47,21 @@ app.use(session({
   }
 }));
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
-
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
   'http://localhost:3001/auth/google/callback'
 );
+// Expanded scopes so a single OAuth consent covers Gmail (read/send), Drive, and Calendar
 const GOOGLE_SCOPES = [
-  'https://www.googleapis.com/auth/drive.readonly',
+  // Drive (read/write - limits to files created or opened by this app)
+  'https://www.googleapis.com/auth/drive.file',
+  // Gmail read & send
   'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  // Calendar read/write
+  'https://www.googleapis.com/auth/calendar',
+  // Basic profile info
   'profile',
   'email'
 ];
@@ -85,6 +94,13 @@ const MCP_COMMANDS = [
   { id: 'download-file', name: 'Download Drive File',   description: 'Download file content from Drive', providers: ['google_drive'] },
   { id: 'upload-file',   name: 'Upload Drive File',     description: 'Upload a new file to Drive', providers: ['google_drive'] },
   { id: 'list-events', name: 'List Calendar Events', description: 'List today\'s Google Calendar events', providers: ['google_calendar'] },
+  { id: 'generate-ui-component', name: 'Generate UI Component', description: 'Generate front-end UI component code', providers: ['21st_dev'] },
+  { id: 'create-project', name: 'Create Project', description: 'Create a Supabase project via Loveable', providers: ['loveable'] },
+  { id: 'manage-database', name: 'Manage Database', description: 'Run database operations', providers: ['loveable'] },
+  { id: 'deploy', name: 'Deploy', description: 'Deploy project via Loveable', providers: ['loveable'] },
+  { id: 'web-search', name: 'Web Search', description: 'Perform a web search via Bolt', providers: ['bolt'] },
+  { id: 'figma-action', name: 'Figma Action', description: 'Interact with Figma via Bolt', providers: ['bolt'] },
+  { id: 'custom-tool', name: 'Custom Tool', description: 'Run a custom Bolt tool', providers: ['bolt'] },
 ];
 
 // After the MCP_COMMANDS array is declared, insert the server version constant
@@ -406,6 +422,30 @@ app.get('/api/providers', (req, res) => {
       requiresApiKey: true
     },
     {
+      id: cursorProvider.id,
+      name: cursorProvider.name,
+      supportedCommands: cursorProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
+      id: twentyFirstDevProvider.id,
+      name: twentyFirstDevProvider.name,
+      supportedCommands: twentyFirstDevProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
+      id: loveableProvider.id,
+      name: loveableProvider.name,
+      supportedCommands: loveableProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
+      id: boltProvider.id,
+      name: boltProvider.name,
+      supportedCommands: boltProvider.supportedCommands,
+      requiresApiKey: true
+    },
+    {
       id: githubProviderPlugin.id,
       name: githubProviderPlugin.name,
       supportedCommands: githubProviderPlugin.supportedCommands,
@@ -432,6 +472,18 @@ app.get('/api/providers/:providerId/resources', async (req, res) => {
       res.json({ resources });
     } else if (providerId === 'gmail') {
       const resources = await gmailProviderPlugin.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'cursor') {
+      const resources = await cursorProvider.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === '21st_dev') {
+      const resources = await twentyFirstDevProvider.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'loveable') {
+      const resources = await loveableProvider.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'bolt') {
+      const resources = await boltProvider.listResources({ apiKey });
       res.json({ resources });
     } else {
       res.status(400).json({ error: 'Provider does not support resource listing' });
@@ -461,7 +513,7 @@ app.get('/auth/google/callback', async (req, res) => {
     // Persist refresh_token (first-time auth) to user row
     if (tokens.refresh_token) {
       const user = await getOrCreateUser();
-      await db.run('UPDATE User SET googleRefreshToken = ? WHERE id = ?', tokens.refresh_token, user.id);
+      await db.run('UPDATE User SET googleRefreshToken = ? WHERE id = ?', encryptValue(tokens.refresh_token), user.id);
     }
     res.send('Google authentication successful! You can close this window.');
   } catch (err) {
@@ -470,50 +522,68 @@ app.get('/auth/google/callback', async (req, res) => {
   }
 });
 
-async function getGoogleAuthFromSession(req) {
-  if (!req.session.googleTokens) return null;
+async function ensureGoogleTokens(req) {
+  const now = Date.now();
+  // 1. If we already have valid session tokens not expiring soon, reuse
+  if (req.session.googleTokens && (req.session.googleTokens.expiry_date ?? 0) - now > 120_000) {
+    return req.session.googleTokens;
+  }
+
+  // 2. Determine refresh token: preference session value, else from DB
+  let refreshToken = req.session.googleTokens?.refresh_token;
+  if (!refreshToken) {
+    try {
+      const user = await getOrCreateUser();
+      if (user.googleRefreshToken) {
+        refreshToken = decryptValue(user.googleRefreshToken);
+      }
+    } catch { /* ignore */ }
+  }
+  if (!refreshToken) return null;
 
   const client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     'http://localhost:3001/auth/google/callback'
   );
-
-  client.setCredentials(req.session.googleTokens);
-
-  // Auto-refresh access token if expired or about to expire (less than 2 min)
-  const expiryDate = req.session.googleTokens.expiry_date || 0;
-  const now = Date.now();
-  if (expiryDate && expiryDate - now < 120_000 && req.session.googleTokens.refresh_token) {
-    try {
-      const { credentials } = await client.refreshAccessToken();
-      // Merge new credentials back into session
-      req.session.googleTokens = {
-        ...req.session.googleTokens,
-        access_token: credentials.access_token,
-        expiry_date: credentials.expiry_date || (now + 3_300_000) // ~55min
-      };
-      client.setCredentials(req.session.googleTokens);
-    } catch (err) {
-      console.error('Google token refresh failed:', err.message);
-    }
+  client.setCredentials({ refresh_token: refreshToken });
+  try {
+    const { credentials } = await client.refreshAccessToken();
+    req.session.googleTokens = {
+      refresh_token: refreshToken,
+      access_token: credentials.access_token,
+      expiry_date: credentials.expiry_date || (now + 3_300_000)
+    };
+    return req.session.googleTokens;
+  } catch (err) {
+    console.error('Google refresh failed:', err.message);
+    return null;
   }
-
-  return client;
 }
 
 // --- Bearer token auth middleware for Google Drive commands ---
-function requireAuth(req, res, next) {
-  // Only enforce auth for Google Drive commands
-  if (!['google_drive','google_calendar'].includes(req.body?.provider)) {
+async function requireAuth(req, res, next) {
+  // Only enforce auth for Google Drive/Calendar commands
+  if (!['google_drive', 'google_calendar'].includes(req.body?.provider)) {
     return next();
   }
+
+  // 1. Prefer explicit Bearer token
   const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing token' });
+  if (auth.startsWith('Bearer ')) {
+    req.googleToken = auth.replace('Bearer ', '');
+    return next();
   }
-  req.googleToken = auth.replace('Bearer ', '');
-  next();
+
+  // 2. Attempt to ensure/refresh session token via refresh_token
+  await ensureGoogleTokens(req);
+  if (req.session.googleTokens?.access_token) {
+    req.googleToken = req.session.googleTokens.access_token;
+    return next();
+  }
+
+  // No token available
+  return res.status(401).json({ error: 'Missing Google OAuth token' });
 }
 
 app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
@@ -664,6 +734,8 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         raw_response: data,
       });
     } else if (provider === 'google_drive') {
+      // Refresh tokens if needed
+      await ensureGoogleTokens(req);
       // We expect the OAuth bearer token to be provided in req.googleToken (set by requireAuth)
       const googleToken = req.googleToken;
       if (!googleToken) {
@@ -702,6 +774,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         return res.status(400).json({ error: err.message });
       }
     } else if (provider === 'google_calendar') {
+      await ensureGoogleTokens(req);
       const googleToken = req.googleToken;
       if (!googleToken) {
         return res.status(401).json({ error: 'Missing Google OAuth token' });
@@ -815,11 +888,28 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       }
     } else if (provider === 'gmail') {
       console.log(`[MCP -> Gmail] command=${command}`);
-      // Determine access token: prefer Authorization header set earlier by requireAuth fallback, else session token
+      // Ensure we have fresh tokens in session if possible
+      await ensureGoogleTokens(req);
       const bearerToken = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : null;
       const accessToken = apiKey || bearerToken || (req.session.googleTokens?.access_token);
 
       const result = await gmailProviderPlugin.executeCommand({ command, prompt: formattedPrompt, apiKey: accessToken });
+      return res.json(result);
+    } else if (provider === 'cursor') {
+      console.log(`[MCP -> Cursor] command=${command}`);
+      const result = await cursorProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
+      return res.json(result);
+    } else if (provider === '21st_dev') {
+      console.log(`[MCP -> 21st DEV] command=${command}`);
+      const result = await twentyFirstDevProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
+      return res.json(result);
+    } else if (provider === 'loveable') {
+      console.log(`[MCP -> Loveable] command=${command}`);
+      const result = await loveableProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
+      return res.json(result);
+    } else if (provider === 'bolt') {
+      console.log(`[MCP -> Bolt] command=${command}`);
+      const result = await boltProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
       return res.json(result);
     } else {
       return res.status(400).json({ error: 'Unsupported provider' });
@@ -1073,11 +1163,55 @@ async function getOrCreateUser() {
   return user;
 }
 
-// --- GitHub PAT storage endpoints ---
+// --- NEW: encryption helpers for API keys & tokens ---
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || process.env.SESSION_SECRET || 'change-me'; // Fallback for local dev
+function getAesKey() {
+  return crypto.createHash('sha256').update(ENCRYPTION_KEY).digest(); // 32-byte key
+}
+
+/**
+ * Encrypt arbitrary text with AES-256-GCM.
+ * Returns a value prefixed with "enc:" so we can detect encrypted payloads later.
+ */
+function encryptValue(str = '') {
+  if (!str) return str;
+  if (str.startsWith('enc:')) return str; // already encrypted
+  const iv = crypto.randomBytes(12); // 96-bit IV per NIST recommendation
+  const cipher = crypto.createCipheriv('aes-256-gcm', getAesKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(str, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const payload = Buffer.concat([iv, tag, encrypted]).toString('base64');
+  return `enc:${payload}`;
+}
+
+/**
+ * Decrypt previously encrypted value (created via encryptValue). If the value
+ * is not encrypted, it is returned as-is for backward compatibility.
+ */
+function decryptValue(str = '') {
+  if (!str || !str.startsWith('enc:')) return str;
+  try {
+    const buf = Buffer.from(str.slice(4), 'base64');
+    const iv = buf.subarray(0, 12);
+    const tag = buf.subarray(12, 28);
+    const encrypted = buf.subarray(28);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getAesKey(), iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    // If decryption fails, return original string so we don't break prod data
+    return str;
+  }
+}
+// --- END encryption helpers ---
+
+// --- GitHub PAT storage endpoints (updated with encryption) ---
 app.get('/api/user/github-token', async (req, res) => {
   try {
     const user = await getOrCreateUser();
-    res.json({ token: user.githubPAT || '' });
+    const token = decryptValue(user.githubPAT || '');
+    res.json({ token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1088,7 +1222,8 @@ app.post('/api/user/github-token', express.json(), async (req, res) => {
   if (!token) return res.status(400).json({ error: 'Missing token' });
   try {
     const user = await getOrCreateUser();
-    await db.run('UPDATE User SET githubPAT = ? WHERE id = ?', token, user.id);
+    const encrypted = encryptValue(token);
+    await db.run('UPDATE User SET githubPAT = ? WHERE id = ?', encrypted, user.id);
     res.json({ saved: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1281,6 +1416,12 @@ app.post('/api/validate-key', express.json(), async (req, res) => {
       const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
       return res.json({ valid: resp.ok });
     }
+    if (provider === 'cursor' || provider === '21st_dev' || provider === 'loveable' || provider === 'bolt') {
+      // TODO: Implement real validation once provider APIs are available.
+      // For now, treat any non-empty key as valid.
+      const valid = typeof apiKey === 'string' && apiKey.trim().length > 0;
+      return res.json({ valid });
+    }
     // Default: unknown provider
     return res.status(400).json({ valid: false, error: 'Provider not supported' });
   } catch (err) {
@@ -1321,5 +1462,31 @@ app.post('/refresh', (req, res) => {
   req.url = '/google/refresh';
   // continue to existing route handler stack
   app._router.handle(req, res);
+});
+
+// --- Status endpoints for front-end UI ---
+app.get('/api/google/status', async (req, res) => {
+  try {
+    // Check in-memory session first
+    if (req.session.googleTokens?.access_token) {
+      return res.json({ connected: true });
+    }
+    // Fallback to DB refresh token
+    const user = await getOrCreateUser();
+    const hasRefresh = !!user.googleRefreshToken;
+    return res.json({ connected: hasRefresh });
+  } catch (err) {
+    return res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
+app.get('/api/github/status', async (req, res) => {
+  try {
+    const user = await getOrCreateUser();
+    const hasToken = !!user.githubPAT;
+    return res.json({ connected: hasToken });
+  } catch (err) {
+    return res.status(500).json({ connected: false, error: err.message });
+  }
 });
 

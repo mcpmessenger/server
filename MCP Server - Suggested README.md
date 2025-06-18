@@ -1,72 +1,10 @@
-# Slash / MCP Server – Technical Product Requirements Document (PRD)
+# MCP Server - Suggested README.md
 
-## Changelog – 2024-06-18
+## Vision
 
-### Backend
-- AES-256-GCM encryption for stored tokens & PATs (`encryptValue` / `decryptValue`).
-- Central token manager: auto-refresh for Gmail, Drive, Calendar.
-- Expanded Google OAuth scopes: `drive.file`, `gmail.readonly`, `gmail.send`, `calendar`.
-- CORS allow-list driven by `CORS_ORIGINS` env var.
-- Health & status endpoints (`/health`, `/api/google/status`, `/api/github/status`).
-- Provider list trimmed to core AI + GitHub in settings.
-
-### Front-End
-- Settings modal now shows **only** OpenAI, Anthropic, Gemini, and GitHub.
-- SmartChat starts minimized by default; header toggle restores it.
-- Google Calendar card removed (shares OAuth behind the scenes).
-
-### Dev Notes
-1. After pulling:
-   ```bash
-   pnpm install # or npm i
-   npm run dev  # front-end
-   node backend/index.js # backend
-   ```
-2. Set environment:
-   ```env
-   ENCRYPTION_KEY=super-long-random-secret
-   CORS_ORIGINS=http://localhost:5173
-   GOOGLE_CLIENT_ID=...
-   GOOGLE_CLIENT_SECRET=...
-   ```
-3. If testing Google locally, add `http://localhost:3001/auth/google/callback` to OAuth client redirect URIs and enable Drive, Gmail, Calendar APIs.
-
----
-
-## Quick Command Cheat-Sheet  
-Natural-language phrases that MCP's Smart Chat can understand today. Use the words **then**, **and**, **and then**, a period, or a semicolon to chain steps—the parser will split them automatically.
-
-### Single-step Examples
-- "Summarize this article"
-- "Translate the above summary to French"
-- "Explain this code snippet"
-- "Generate a unit test for this function"
-- "List my last 5 GitHub repos"
-- "Get README.md from sentilabs01/alexa"
-- "Send email to john@example.com — Subject: Hello — Body: Here's the weekly report"
-- "List Google Drive files in folder Docs"
-
-### Multi-step / Chained Examples
-- "List my last 2 GitHub repos then summarize the most active one"
-- "Get README of sentilabs01/alexa; summarize it; generate an issue titled 'Documentation improvements' in the same repo"
-- "Fetch today's Gmail inbox, summarize messages, and translate the summary to Spanish"
-- "List files in Google Drive folder Docs and summarize each one"
-- "Extract text from the attached image then run sentiment analysis"
-- "Summarize this PDF and email the summary to my team"
-- "Translate the attached CSV to Japanese and upload it back to Google Drive"
-- "List AI-enabled Zaps and trigger Zap 12345"
-- "Run code search for 'useEffect cleanup' in sentilabs01/alexa then summarize the findings"
-
-These are simply **suggestions**—the intent parser is purposefully lenient, so feel free to phrase commands naturally. If a step maps to an integration (GitHub, Gmail, Google Drive, Zapier, etc.) MCP routes it automatically; otherwise it treats it as an AI prompt.
-
----
-
-## 1. Vision
 A unified backend service for the Model Context Protocol (MCP), enabling API-driven, multi-provider AI and automation command execution, workflow chaining, and seamless integration with services like GitHub and Google. MCP Server acts as the core engine for orchestrating commands and workflows across apps and protocols.
 
----
-
-## 2. Tech Stack
+## Tech Stack
 
 **Backend:**
 - Node.js (Express, ES modules)
@@ -81,9 +19,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - Custom UI components, lucide-react icons
 - State management with custom React hooks
 
----
-
-## 3. Core Features
+## Core Features
 
 **API/Backend**
 - API endpoints: `/api/chat`, `/api/workflow`, `/api/github`, `/api/google`, `/api/health`
@@ -103,9 +39,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - Provider status indicators (connected/disconnected, last used, request count)
 - Modern, responsive UI with dark/light mode
 
----
-
-## 4. User Workflows
+## User Workflows
 
 - **Multi-provider AI chat:** Apps or users can send chat, summarize, or code commands to OpenAI, Anthropic, or Gemini using their own API keys.
 - **Command registry:** Supports chat, summarize, code search, repo summary, explain, translate, and more.
@@ -116,9 +50,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - **File upload:** Summarize or process uploaded files.
 - **Session-based authentication:** Secure, per-user integration tokens.
 
----
-
-## 5. Security & Best Practices
+## Security & Best Practices
 
 - TypeScript everywhere
 - Tailwind CSS for utility-first, responsive design (frontend)
@@ -128,9 +60,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - CORS restricted to local dev ports
 - Per-user token storage in SQLite
 
----
-
-## 6. Roadmap & Next Steps
+## Roadmap & Next Steps
 
 - Visual workflow builder (drag-and-drop, optional)
 - More integrations (Notion, Slack, Jira, etc.)
@@ -140,52 +70,11 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - Harden OAuth flows, encrypt API keys, audit CORS
 - Add unit and integration tests
 
----
-
-## 7. Example Use Cases
+## Example Use Cases
 
 - "Summarize this PDF and then translate it to Spanish."
 - "Fetch the latest GitHub issues, summarize them, and email the summary to my team."
 - "Extract text from an image, then run sentiment analysis."
-
----
-
-# Slash / MCP Server
-
-## Product Requirements Document (PRD)
-
-**Core Features:**
-- API-driven, multi-provider AI chat (OpenAI, Anthropic, Gemini) with per-user API keys.
-- Command registry: supports chat, summarize, code search, repo summary, explain, translate, and more.
-- Google Drive, Gmail, and GitHub integrations with OAuth or token-based credentials.
-- Real-time provider connection status via API.
-- Smart intent parsing: routes commands to the correct provider or integration.
-- Chained command parsing: apps or users can enter multi-step instructions in one message.
-- Workflow builder (optional): design and run multi-step, multi-provider workflows.
-- File upload and summarization.
-- Session-based authentication for integrations.
-- Modern, responsive (optional) UI for admin/configuration.
-
-**Advanced/Upcoming:**
-- Visual workflow builder (drag-and-drop, optional).
-- More integrations (Notion, Slack, Jira, etc).
-- Custom command macros and user-defined workflows.
-- Scheduling and automation.
-- Contextual memory and chaining across sessions.
-
----
-
-## Features
-
-- **API-driven multi-provider AI chat:** OpenAI, Anthropic, Gemini (per-user API keys)
-- **Command registry:** Chat, summarize, code search, repo summary, explain, translate, and more
-- **Integrations:** Google Drive, Gmail, GitHub (OAuth or token-based credentials)
-- **Smart intent parsing:** Natural language commands routed to the right provider/integration
-- **Chained commands:** Enter multi-step instructions in one message
-- **Workflow builder:** (optional) Visual multi-step, multi-provider workflows
-- **File upload:** Summarize or process uploaded files
-- **Session-based authentication:** Secure, per-user integration tokens
-- **Modern UI (optional):** Responsive, dark/light mode, real-time provider status
 
 ## Chained Commands & API
 
@@ -233,12 +122,6 @@ Chained commands allow apps or users to combine multiple actions in a single wor
 3. User/app reviews/edits the steps.
 4. User/app clicks "Run."
 5. API/UI shows progress and results for each step.
-
----
-
-**For questions, contributions, or commercial use, contact [automationalien.com](https://automationalien.com)**
-
----
 
 ## MCP API Reference
 
@@ -318,15 +201,7 @@ zapier push   # follow prompts to create a private version
 
 See the individual READMEs in each folder for more details.
 
----
-
-## Claude Desktop Integration – Quick Start
-
-```README.md
-
-```
-
-### Built-in Zapier Provider (AI Actions)
+## Built-in Zapier Provider (AI Actions)
 
 MCP Server now supports Zapier **AI Actions (NLA)** natively via the `/api/command` endpoint.
 
@@ -352,4 +227,4 @@ The server converts both requests into calls to Zapier's NLA endpoints:
 
 All responses (including errors) are returned as JSON, making them safe to consume from the front-end or other automations.
 
----
+

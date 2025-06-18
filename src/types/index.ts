@@ -1,7 +1,7 @@
 export interface Provider {
   id: string;
   name: string;
-  status: 'connected' | 'disconnected' | 'error';
+  status: 'connected' | 'disconnected' | 'error' | 'pending';
   color: string;
   icon: string;
   apiKey?: string;

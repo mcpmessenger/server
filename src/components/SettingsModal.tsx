@@ -44,7 +44,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
   const [n8nSecret, setN8nSecret] = useState('');
   const [webhookError, setWebhookError] = useState<string | null>(null);
   const [tempKeys, setTempKeys] = useState<{ [id: string]: string }>(() => initialTempKeys(providers));
-  const [keyStatus, setKeyStatus] = useState<{ [id: string]: 'connected' | 'disconnected' | 'error' | 'checking' }>({});
+  const [keyStatus, setKeyStatus] = useState<{ [id: string]: 'connected' | 'disconnected' | 'error' | 'checking' | 'pending' }>({});
   const [keyError, setKeyError] = useState<{ [id: string]: string }>({});
   const [webhooks, setWebhooks] = useState<Webhook[]>([]);
   const [newWebhook, setNewWebhook] = useState<{ name: string; url: string; type: string; secret?: string }>({ name: '', url: '', type: 'zapier', secret: '' });
@@ -128,9 +128,9 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
 
   const handleSaveKey = async (providerId: string) => {
     const apiKey = tempKeys[providerId];
-    setKeyStatus(s => ({ ...s, [providerId]: 'checking' }));
+    setKeyStatus(s => ({ ...s, [providerId]: 'checking' as const }));
     const { status, error } = await validateApiKey(providerId, apiKey);
-    setKeyStatus(s => ({ ...s, [providerId]: status }));
+    setKeyStatus(s => ({ ...s, [providerId]: status as typeof keyStatus[string] }));
     setKeyError(e => ({ ...e, [providerId]: error }));
     if (status === 'connected') {
       onSetApiKey(providerId, apiKey);
@@ -139,7 +139,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
 
   const handleDeleteKey = (providerId: string) => {
     setTempKeys(k => ({ ...k, [providerId]: '' }));
-    setKeyStatus(s => ({ ...s, [providerId]: 'disconnected' }));
+    setKeyStatus(s => ({ ...s, [providerId]: 'disconnected' as const }));
     setKeyError(e => ({ ...e, [providerId]: '' }));
     onSetApiKey(providerId, '');
   };
@@ -319,6 +319,16 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
       )
     },
     {
+      id: 'google_calendar',
+      name: 'Google Calendar',
+      icon: <Globe className="w-6 h-6 text-white" />,
+      color: 'from-green-400 to-blue-500',
+      status: googleConnected ? 'connected' : 'disconnected',
+      action: (
+        <div className="text-xs text-gray-600 dark:text-gray-400">Uses the same Google connection. Calendar commands are now available.</div>
+      )
+    },
+    {
       id: 'zapier',
       name: 'Zapier',
       icon: <Zap className="w-6 h-6 text-white" />,
@@ -393,8 +403,6 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({ open, onClose, pro
         </div>
       )
     })),
-    { section: 'Integrations' },
-    ...integrationItems
   ];
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40" onClick={handleOverlayClick}>
