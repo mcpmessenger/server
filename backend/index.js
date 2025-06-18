@@ -24,7 +24,13 @@ dotenv.config();
 
 const app = express();
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://localhost:5174', 'http://localhost:5176', 'http://localhost:5177'],
+  origin: (origin, callback) => {
+    const allowList = (process.env.CORS_ORIGINS || 'http://localhost:5173').split(',').map(o => o.trim());
+    if (!origin || allowList.includes(origin)) {
+      return callback(null, true);
+    }
+    callback(new Error('Origin not allowed by CORS'));
+  },
   credentials: true
 }));
 app.use(bodyParser.json({ limit: '10mb' }));
@@ -41,22 +47,21 @@ app.use(session({
   }
 }));
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
-
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
-
 const oauth2Client = new google.auth.OAuth2(
   process.env.GOOGLE_CLIENT_ID,
   process.env.GOOGLE_CLIENT_SECRET,
   'http://localhost:3001/auth/google/callback'
 );
+// Expanded scopes so a single OAuth consent covers Gmail (read/send), Drive, and Calendar
 const GOOGLE_SCOPES = [
-  'https://www.googleapis.com/auth/drive.readonly',
+  // Drive (read/write - limits to files created or opened by this app)
+  'https://www.googleapis.com/auth/drive.file',
+  // Gmail read & send
   'https://www.googleapis.com/auth/gmail.readonly',
+  'https://www.googleapis.com/auth/gmail.send',
+  // Calendar read/write
+  'https://www.googleapis.com/auth/calendar',
+  // Basic profile info
   'profile',
   'email'
 ];
@@ -508,7 +513,7 @@ app.get('/auth/google/callback', async (req, res) => {
     // Persist refresh_token (first-time auth) to user row
     if (tokens.refresh_token) {
       const user = await getOrCreateUser();
-      await db.run('UPDATE User SET googleRefreshToken = ? WHERE id = ?', tokens.refresh_token, user.id);
+      await db.run('UPDATE User SET googleRefreshToken = ? WHERE id = ?', encryptValue(tokens.refresh_token), user.id);
     }
     res.send('Google authentication successful! You can close this window.');
   } catch (err) {
@@ -517,50 +522,68 @@ app.get('/auth/google/callback', async (req, res) => {
   }
 });
 
-async function getGoogleAuthFromSession(req) {
-  if (!req.session.googleTokens) return null;
+async function ensureGoogleTokens(req) {
+  const now = Date.now();
+  // 1. If we already have valid session tokens not expiring soon, reuse
+  if (req.session.googleTokens && (req.session.googleTokens.expiry_date ?? 0) - now > 120_000) {
+    return req.session.googleTokens;
+  }
+
+  // 2. Determine refresh token: preference session value, else from DB
+  let refreshToken = req.session.googleTokens?.refresh_token;
+  if (!refreshToken) {
+    try {
+      const user = await getOrCreateUser();
+      if (user.googleRefreshToken) {
+        refreshToken = decryptValue(user.googleRefreshToken);
+      }
+    } catch { /* ignore */ }
+  }
+  if (!refreshToken) return null;
 
   const client = new google.auth.OAuth2(
     process.env.GOOGLE_CLIENT_ID,
     process.env.GOOGLE_CLIENT_SECRET,
     'http://localhost:3001/auth/google/callback'
   );
-
-  client.setCredentials(req.session.googleTokens);
-
-  // Auto-refresh access token if expired or about to expire (less than 2 min)
-  const expiryDate = req.session.googleTokens.expiry_date || 0;
-  const now = Date.now();
-  if (expiryDate && expiryDate - now < 120_000 && req.session.googleTokens.refresh_token) {
-    try {
-      const { credentials } = await client.refreshAccessToken();
-      // Merge new credentials back into session
-      req.session.googleTokens = {
-        ...req.session.googleTokens,
-        access_token: credentials.access_token,
-        expiry_date: credentials.expiry_date || (now + 3_300_000) // ~55min
-      };
-      client.setCredentials(req.session.googleTokens);
-    } catch (err) {
-      console.error('Google token refresh failed:', err.message);
-    }
+  client.setCredentials({ refresh_token: refreshToken });
+  try {
+    const { credentials } = await client.refreshAccessToken();
+    req.session.googleTokens = {
+      refresh_token: refreshToken,
+      access_token: credentials.access_token,
+      expiry_date: credentials.expiry_date || (now + 3_300_000)
+    };
+    return req.session.googleTokens;
+  } catch (err) {
+    console.error('Google refresh failed:', err.message);
+    return null;
   }
-
-  return client;
 }
 
 // --- Bearer token auth middleware for Google Drive commands ---
-function requireAuth(req, res, next) {
-  // Only enforce auth for Google Drive commands
-  if (!['google_drive','google_calendar'].includes(req.body?.provider)) {
+async function requireAuth(req, res, next) {
+  // Only enforce auth for Google Drive/Calendar commands
+  if (!['google_drive', 'google_calendar'].includes(req.body?.provider)) {
     return next();
   }
+
+  // 1. Prefer explicit Bearer token
   const auth = req.headers.authorization || '';
-  if (!auth.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Missing token' });
+  if (auth.startsWith('Bearer ')) {
+    req.googleToken = auth.replace('Bearer ', '');
+    return next();
   }
-  req.googleToken = auth.replace('Bearer ', '');
-  next();
+
+  // 2. Attempt to ensure/refresh session token via refresh_token
+  await ensureGoogleTokens(req);
+  if (req.session.googleTokens?.access_token) {
+    req.googleToken = req.session.googleTokens.access_token;
+    return next();
+  }
+
+  // No token available
+  return res.status(401).json({ error: 'Missing Google OAuth token' });
 }
 
 app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
@@ -711,6 +734,8 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         raw_response: data,
       });
     } else if (provider === 'google_drive') {
+      // Refresh tokens if needed
+      await ensureGoogleTokens(req);
       // We expect the OAuth bearer token to be provided in req.googleToken (set by requireAuth)
       const googleToken = req.googleToken;
       if (!googleToken) {
@@ -749,6 +774,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         return res.status(400).json({ error: err.message });
       }
     } else if (provider === 'google_calendar') {
+      await ensureGoogleTokens(req);
       const googleToken = req.googleToken;
       if (!googleToken) {
         return res.status(401).json({ error: 'Missing Google OAuth token' });
@@ -862,7 +888,8 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       }
     } else if (provider === 'gmail') {
       console.log(`[MCP -> Gmail] command=${command}`);
-      // Determine access token: prefer Authorization header set earlier by requireAuth fallback, else session token
+      // Ensure we have fresh tokens in session if possible
+      await ensureGoogleTokens(req);
       const bearerToken = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : null;
       const accessToken = apiKey || bearerToken || (req.session.googleTokens?.access_token);
 
@@ -1136,11 +1163,55 @@ async function getOrCreateUser() {
   return user;
 }
 
-// --- GitHub PAT storage endpoints ---
+// --- NEW: encryption helpers for API keys & tokens ---
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || process.env.SESSION_SECRET || 'change-me'; // Fallback for local dev
+function getAesKey() {
+  return crypto.createHash('sha256').update(ENCRYPTION_KEY).digest(); // 32-byte key
+}
+
+/**
+ * Encrypt arbitrary text with AES-256-GCM.
+ * Returns a value prefixed with "enc:" so we can detect encrypted payloads later.
+ */
+function encryptValue(str = '') {
+  if (!str) return str;
+  if (str.startsWith('enc:')) return str; // already encrypted
+  const iv = crypto.randomBytes(12); // 96-bit IV per NIST recommendation
+  const cipher = crypto.createCipheriv('aes-256-gcm', getAesKey(), iv);
+  const encrypted = Buffer.concat([cipher.update(str, 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  const payload = Buffer.concat([iv, tag, encrypted]).toString('base64');
+  return `enc:${payload}`;
+}
+
+/**
+ * Decrypt previously encrypted value (created via encryptValue). If the value
+ * is not encrypted, it is returned as-is for backward compatibility.
+ */
+function decryptValue(str = '') {
+  if (!str || !str.startsWith('enc:')) return str;
+  try {
+    const buf = Buffer.from(str.slice(4), 'base64');
+    const iv = buf.subarray(0, 12);
+    const tag = buf.subarray(12, 28);
+    const encrypted = buf.subarray(28);
+    const decipher = crypto.createDecipheriv('aes-256-gcm', getAesKey(), iv);
+    decipher.setAuthTag(tag);
+    const decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()]);
+    return decrypted.toString('utf8');
+  } catch {
+    // If decryption fails, return original string so we don't break prod data
+    return str;
+  }
+}
+// --- END encryption helpers ---
+
+// --- GitHub PAT storage endpoints (updated with encryption) ---
 app.get('/api/user/github-token', async (req, res) => {
   try {
     const user = await getOrCreateUser();
-    res.json({ token: user.githubPAT || '' });
+    const token = decryptValue(user.githubPAT || '');
+    res.json({ token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1151,7 +1222,8 @@ app.post('/api/user/github-token', express.json(), async (req, res) => {
   if (!token) return res.status(400).json({ error: 'Missing token' });
   try {
     const user = await getOrCreateUser();
-    await db.run('UPDATE User SET githubPAT = ? WHERE id = ?', token, user.id);
+    const encrypted = encryptValue(token);
+    await db.run('UPDATE User SET githubPAT = ? WHERE id = ?', encrypted, user.id);
     res.json({ saved: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1390,5 +1462,31 @@ app.post('/refresh', (req, res) => {
   req.url = '/google/refresh';
   // continue to existing route handler stack
   app._router.handle(req, res);
+});
+
+// --- Status endpoints for front-end UI ---
+app.get('/api/google/status', async (req, res) => {
+  try {
+    // Check in-memory session first
+    if (req.session.googleTokens?.access_token) {
+      return res.json({ connected: true });
+    }
+    // Fallback to DB refresh token
+    const user = await getOrCreateUser();
+    const hasRefresh = !!user.googleRefreshToken;
+    return res.json({ connected: hasRefresh });
+  } catch (err) {
+    return res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
+app.get('/api/github/status', async (req, res) => {
+  try {
+    const user = await getOrCreateUser();
+    const hasToken = !!user.githubPAT;
+    return res.json({ connected: hasToken });
+  } catch (err) {
+    return res.status(500).json({ connected: false, error: err.message });
+  }
 });
 

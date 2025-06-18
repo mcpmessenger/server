@@ -33,7 +33,7 @@ export const SettingsModalNew: React.FC<SettingsModalNewProps> = ({ open, onClos
           <section>
             <h3 className="text-sm font-semibold text-gray-500 uppercase mb-4">Providers</h3>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-              {providers.map(p => {
+              {providers.filter(p => ['openai','anthropic','gemini','github'].includes(p.id)).map(p => {
                 const Icon = iconMap[p.icon as string] || Globe;
                 return (
                   <div key={p.id} className="border border-gray-200 dark:border-neutral-700 rounded-xl p-4 flex flex-col gap-3 bg-white/70 dark:bg-neutral-800">

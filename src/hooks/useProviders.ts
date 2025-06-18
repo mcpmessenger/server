@@ -83,30 +83,6 @@ const defaultProviders: Provider[] = [
     requestCount: 0
   },
   {
-    id: 'slack',
-    name: 'Slack',
-    status: 'disconnected',
-    color: 'from-purple-600 to-green-400',
-    icon: 'Globe',
-    requestCount: 0
-  },
-  {
-    id: 'chroma',
-    name: 'Chroma',
-    status: 'disconnected',
-    color: 'from-teal-500 to-emerald-600',
-    icon: 'Globe',
-    requestCount: 0
-  },
-  {
-    id: 'jupyter',
-    name: 'Jupyter',
-    status: 'disconnected',
-    color: 'from-yellow-500 to-orange-600',
-    icon: 'Globe',
-    requestCount: 0
-  },
-  {
     id: 'cursor',
     name: 'Cursor',
     status: 'disconnected',
@@ -136,6 +112,14 @@ const defaultProviders: Provider[] = [
     status: 'disconnected',
     color: 'from-amber-400 to-yellow-500',
     icon: 'Zap',
+    requestCount: 0
+  },
+  {
+    id: 'google_calendar',
+    name: 'Google Calendar',
+    status: 'disconnected',
+    color: 'from-green-400 to-blue-500',
+    icon: 'Globe',
     requestCount: 0
   }
 ];

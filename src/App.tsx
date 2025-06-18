@@ -30,7 +30,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [showCommands, setShowCommands] = useState(false);
   const [chatInput, setChatInput] = useState('');
-  const [chatMinimized, setChatMinimized] = useState(false);
+  const [chatMinimized, setChatMinimized] = useState(true);
   // Global ticker showing last command executed
   const [ticker, setTicker] = useState<string>('');
 
