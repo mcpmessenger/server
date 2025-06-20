@@ -15,6 +15,8 @@ import { open } from 'sqlite';
 import { jwtDecode } from "jwt-decode";
 import { parseIntent } from './parser.js';
 import crypto from 'crypto';
+import { getCredentials as daoGetCredentials, saveCredentials as daoSaveCredentials, deleteCredentials as daoDeleteCredentials } from './services/credentialDao.js';
+import slackProvider from './providers/slack.js';
 
 dotenv.config();
 
@@ -513,10 +515,9 @@ app.get('/auth/google/callback', async (req, res) => {
   try {
     const { tokens } = await oauth2Client.getToken(code);
     req.session.googleTokens = tokens;
-    // Persist refresh_token (first-time auth) to user row
+    // Persist refresh_token using Credential DAO
     if (tokens.refresh_token) {
-      const user = await getOrCreateUser();
-      await db.run('UPDATE User SET googleRefreshToken = ? WHERE id = ?', encryptValue(tokens.refresh_token), user.id);
+      await daoSaveCredentials('google', { refreshToken: encryptValue(tokens.refresh_token) });
     }
     res.send('Google authentication successful! You can close this window.');
   } catch (err) {
@@ -532,15 +533,22 @@ async function ensureGoogleTokens(req) {
     return req.session.googleTokens;
   }
 
-  // 2. Determine refresh token: preference session value, else from DB
+  // 2. Determine refresh token: preference session value, else DAO, else legacy DB
   let refreshToken = req.session.googleTokens?.refresh_token;
   if (!refreshToken) {
-    try {
-      const user = await getOrCreateUser();
-      if (user.googleRefreshToken) {
-        refreshToken = decryptValue(user.googleRefreshToken);
-      }
-    } catch { /* ignore */ }
+    const creds = await daoGetCredentials('google');
+    if (creds?.refreshToken) {
+      refreshToken = decryptValue(creds.refreshToken);
+    } else {
+      try {
+        const user = await getOrCreateUser();
+        if (user.googleRefreshToken) {
+          refreshToken = decryptValue(user.googleRefreshToken);
+          // migrate to DAO for future usage
+          await daoSaveCredentials('google', { refreshToken: encryptValue(refreshToken) });
+        }
+      } catch { /* ignore */ }
+    }
   }
   if (!refreshToken) return null;
 
@@ -557,6 +565,15 @@ async function ensureGoogleTokens(req) {
       access_token: credentials.access_token,
       expiry_date: credentials.expiry_date || (now + 3_300_000)
     };
+    try {
+      await daoSaveCredentials('google', {
+        refreshToken: encryptValue(refreshToken),
+        accessToken: encryptValue(credentials.access_token),
+        expiresAt: credentials.expiry_date || (now + 3_300_000)
+      });
+    } catch {
+      /* ignore persistence errors */
+    }
     return req.session.googleTokens;
   } catch (err) {
     console.error('Google refresh failed:', err.message);
@@ -592,6 +609,31 @@ async function requireAuth(req, res, next) {
 app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
   // Log only high-level details to avoid dumping full conversation to console
   let { prompt, provider, command, apiKey } = req.body;
+  const cmdIdHeader = req.headers['x-mcp-command-id'];
+  const cmdId = Array.isArray(cmdIdHeader) ? cmdIdHeader[0] : (cmdIdHeader || crypto.randomUUID());
+
+  // initial progress event
+  broadcastEvent('command-progress', {
+    id: cmdId,
+    provider,
+    command,
+    percent: 0,
+    stage: 'start',
+    message: 'queued'
+  });
+
+  // emit complete once response finishes
+  res.once('finish', () => {
+    const ok = res.statusCode < 400;
+    broadcastEvent('command-complete', {
+      id: cmdId,
+      provider,
+      command,
+      success: ok,
+      error: ok ? undefined : res.locals?.errorMessage
+    });
+  });
+
   // Fallback: if no apiKey field provided use Bearer token from Authorization header
   if (!apiKey && typeof req.headers.authorization === 'string' && req.headers.authorization.startsWith('Bearer ')) {
     apiKey = req.headers.authorization.replace('Bearer ', '').trim();
@@ -819,6 +861,12 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
           await octokit.request('GET /user');
           return res.json({ success: true, output: 'Token is valid', provider: 'github' });
         }
+        // Fallback to stored encrypted PAT if apiKey omitted
+        if (!apiKey) {
+          const creds = await daoGetCredentials('github');
+          apiKey = creds?.token ? decryptValue(creds.token) : '';
+        }
+
         const result = await githubProviderPlugin.executeCommand({ command, prompt: formattedPrompt, apiKey });
         return res.json(result);
       } catch (err) {
@@ -996,8 +1044,8 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
     } else if (provider === 'slack') {
       // fallback to stored token if apiKey omitted
       if (!apiKey) {
-        const user = await getOrCreateUser();
-        apiKey = user.slackToken;
+        const creds = await daoGetCredentials('slack');
+        apiKey = creds?.token ? decryptValue(creds.token) : '';
       }
       const result = await slackProvider.executeCommand({ command, params: req.body.params, apiKey });
       return res.json(result);
@@ -1333,8 +1381,8 @@ function decryptValue(str = '') {
 // --- GitHub PAT storage endpoints (updated with encryption) ---
 app.get('/api/user/github-token', async (req, res) => {
   try {
-    const user = await getOrCreateUser();
-    const token = decryptValue(user.githubPAT || '');
+    const creds = await daoGetCredentials('github');
+    const token = creds?.token ? decryptValue(creds.token) : '';
     res.json({ token });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1345,9 +1393,8 @@ app.post('/api/user/github-token', express.json(), async (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: 'Missing token' });
   try {
-    const user = await getOrCreateUser();
     const encrypted = encryptValue(token);
-    await db.run('UPDATE User SET githubPAT = ? WHERE id = ?', encrypted, user.id);
+    await daoSaveCredentials('github', { token: encrypted });
     res.json({ saved: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1356,8 +1403,7 @@ app.post('/api/user/github-token', express.json(), async (req, res) => {
 
 app.delete('/api/user/github-token', async (req, res) => {
   try {
-    const user = await getOrCreateUser();
-    await db.run('UPDATE User SET githubPAT = NULL WHERE id = ?', user.id);
+    await daoDeleteCredentials('github');
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1367,8 +1413,9 @@ app.delete('/api/user/github-token', async (req, res) => {
 // --- Slack Bot token storage endpoints ---
 app.get('/api/user/slack-token', async (req, res) => {
   try {
-    const user = await getOrCreateUser();
-    res.json({ token: user.slackToken || '' });
+    const creds = await daoGetCredentials('slack');
+    const token = creds?.token ? decryptValue(creds.token) : '';
+    res.json({ token });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -1378,8 +1425,7 @@ app.post('/api/user/slack-token', express.json(), async (req, res) => {
   const { token } = req.body;
   if (!token) return res.status(400).json({ error: 'Missing token' });
   try {
-    const user = await getOrCreateUser();
-    await db.run('UPDATE User SET slackToken = ? WHERE id = ?', token, user.id);
+    await daoSaveCredentials('slack', { token: encryptValue(token) });
     res.json({ saved: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -1388,11 +1434,46 @@ app.post('/api/user/slack-token', express.json(), async (req, res) => {
 
 app.delete('/api/user/slack-token', async (req, res) => {
   try {
-    const user = await getOrCreateUser();
-    await db.run('UPDATE User SET slackToken = NULL WHERE id = ?', user.id);
+    await daoDeleteCredentials('slack');
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// After Slack token routes, add unified credentials REST endpoints
+app.get('/api/credentials/:providerId', async (req, res) => {
+  const { providerId } = req.params;
+  if (!providerId) return res.status(400).json({ error: 'Missing providerId' });
+  try {
+    const credentials = await daoGetCredentials(providerId);
+    return res.json({ credentials });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/credentials/:providerId', express.json(), async (req, res) => {
+  const { providerId } = req.params;
+  if (!providerId) return res.status(400).json({ error: 'Missing providerId' });
+  const { credentials } = req.body || {};
+  if (!credentials || typeof credentials !== 'object') return res.status(400).json({ error: 'Missing credentials object' });
+  try {
+    await daoSaveCredentials(providerId, credentials);
+    return res.json({ saved: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/credentials/:providerId', async (req, res) => {
+  const { providerId } = req.params;
+  if (!providerId) return res.status(400).json({ error: 'Missing providerId' });
+  try {
+    await daoDeleteCredentials(providerId);
+    return res.json({ deleted: true });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -1623,13 +1704,13 @@ app.post('/refresh', (req, res) => {
 // --- Status endpoints for front-end UI ---
 app.get('/api/google/status', async (req, res) => {
   try {
-    // Check in-memory session first
+    // Session token
     if (req.session.googleTokens?.access_token) {
       return res.json({ connected: true });
     }
-    // Fallback to DB refresh token
-    const user = await getOrCreateUser();
-    const hasRefresh = !!user.googleRefreshToken;
+    // DAO refresh token
+    const creds = await daoGetCredentials('google');
+    const hasRefresh = !!creds?.refreshToken;
     return res.json({ connected: hasRefresh });
   } catch (err) {
     return res.status(500).json({ connected: false, error: err.message });
@@ -1645,4 +1726,111 @@ app.get('/api/github/status', async (req, res) => {
     return res.status(500).json({ connected: false, error: err.message });
   }
 });
+
+// After existing /api/github/status endpoint
+app.get('/api/:provider/status', async (req, res) => {
+  const providerId = canonicalProvider(req.params.provider);
+  try {
+    if (providerId === 'google') {
+      // session first
+      if (req.session.googleTokens?.access_token) {
+        return res.json({ connected: true });
+      }
+      const creds = await daoGetCredentials('google');
+      return res.json({ connected: !!creds?.refreshToken });
+    }
+    if (providerId === 'github' || providerId === 'slack' || providerId === 'notion' || providerId === 'jira') {
+      const creds = await daoGetCredentials(providerId);
+      return res.json({ connected: !!creds?.token || !!creds?.apiKey });
+    }
+    // default: check any credentials blob
+    const creds = await daoGetCredentials(providerId);
+    return res.json({ connected: !!creds });
+  } catch (err) {
+    return res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
+// ── SSE Event Bus (mcp/events) ─────────────────────────────
+const sseClients = new Set();
+function broadcastEvent(type, payload = {}) {
+  const json = JSON.stringify(payload);
+  for (const res of sseClients) {
+    try {
+      res.write(`event: ${type}\n`);
+      res.write(`data: ${json}\n\n`);
+    } catch {
+      // client disconnected; will be pruned on 'close'
+    }
+  }
+}
+
+app.get('/mcp/events', (req, res) => {
+  console.log('[MCP] New /mcp/events connection from', req.ip);
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.flushHeaders();
+  res.write(': connected\n\n');
+  sseClients.add(res);
+
+  const ping = setInterval(() => {
+    if (!res.writableEnded) {
+      res.write('event: ping\n');
+      res.write('data: {}\n\n');
+    }
+  }, 20000);
+
+  req.on('close', () => {
+    clearInterval(ping);
+    sseClients.delete(res);
+    console.log('[MCP] /mcp/events client disconnected', req.ip);
+  });
+});
+
+// ── Token Manager (auto-refresh) ──────────────────────────
+function startTokenManager() {
+  const FIVE_MIN = 5 * 60 * 1000;
+  const intervalMs = 10 * 60 * 1000; // 10 min
+  setInterval(async () => {
+    try {
+      const creds = await daoGetCredentials('google');
+      if (!creds || !creds.refreshToken) return;
+      const expiresAt = creds.expiresAt || 0;
+      if (expiresAt - Date.now() > FIVE_MIN) return; // still fresh
+
+      const refreshToken = decryptValue(creds.refreshToken);
+      const oauth = new google.auth.OAuth2(
+        process.env.GOOGLE_CLIENT_ID,
+        process.env.GOOGLE_CLIENT_SECRET,
+        'http://localhost:3001/auth/google/callback'
+      );
+      oauth.setCredentials({ refresh_token: refreshToken });
+      const { credentials } = await oauth.refreshAccessToken();
+      const newCreds = {
+        refreshToken: encryptValue(refreshToken),
+        accessToken: encryptValue(credentials.access_token),
+        expiresAt: credentials.expiry_date || (Date.now() + 3300000)
+      };
+      await daoSaveCredentials('google', newCreds);
+      broadcastEvent('token-refresh', { provider: 'google', refreshed: true });
+      console.log('[TokenManager] Google token refreshed');
+    } catch (err) {
+      console.error('[TokenManager] Google refresh failed:', err.message);
+    }
+  }, intervalMs);
+}
+
+startTokenManager();
+
+// Provider alias map (canonicalizing IDs)
+const PROVIDER_ALIASES = {
+  gmail: 'google',
+  google_drive: 'google',
+  google_calendar: 'google'
+};
+function canonicalProvider(id = '') {
+  return PROVIDER_ALIASES[id] || id;
+}
 

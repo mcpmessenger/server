@@ -31,6 +31,34 @@
    ```
 3. If testing Google locally, add `http://localhost:3001/auth/google/callback` to OAuth client redirect URIs and enable Drive, Gmail, Calendar APIs.
 
+## Changelog – 2025-06-20
+
+### Backend
+- Added **modular provider plugins** for **Slack**, **Jira**, **Notion**, **Loveable**, **Bolt**, and **21st.dev** (UI component generator).
+- Introduced **Credential DAO** (`backend/services/credentialDao.js`) with Supabase support and local SQLite fallback for per-user provider credentials.
+- New **/api/providers** and **/api/providers/:providerId/resources** endpoints expose provider metadata and resource discovery (MCP extension).
+- Slack commands: `send-message`, `list-channels`, `get-channel-history`.
+- Jira commands: `list-projects`, `create-issue`.
+- Notion commands: `list-databases`, `query-database`.
+- Enhanced Google token refresh flow now persists refresh tokens via Credential DAO and AES-256-GCM encryption.
+- Minor: constant `MCP_SERVER_VERSION` added (`2024-07-01`).
+
+### Front-End (admin UI)
+- No visual changes yet – new providers appear dynamically once API keys are supplied.
+
+### Dev Notes
+1. New env vars (backend):
+   ```env
+   SUPABASE_URL=<your supabase url>
+   SUPABASE_SERVICE_ROLE_KEY=<service role key>
+   SLACK_BOT_TOKEN=xoxb-...
+   JIRA_HOST=<your-domain.atlassian.net>
+   JIRA_EMAIL=<jira account email>
+   JIRA_API_TOKEN=<jira api token>
+   NOTION_TOKEN=<secret_...>
+   ```
+2. Run `npm install` inside `backend/` to pull new dependencies: `@slack/web-api`, `@supabase/supabase-js`, `@notionhq/client`, `axios`.
+
 ---
 
 ## Quick Command Cheat-Sheet  
@@ -71,7 +99,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 **Backend:**
 - Node.js (Express, ES modules)
 - AI Providers: OpenAI, Anthropic, Google Generative AI (Gemini)
-- Integrations: Google (OAuth), GitHub (token-based)
+- Integrations: Google (OAuth), GitHub (token-based), **Slack, Jira, Notion, Loveable, Bolt, 21st.dev**
 - Session management: express-session
 - Database: SQLite (per-user integration tokens)
 - Security: CORS, dotenv, multer
@@ -139,6 +167,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - Contextual memory and chaining across sessions
 - Harden OAuth flows, encrypt API keys, audit CORS
 - Add unit and integration tests
+- Finalise Bolt & 21st.dev integrations; add UI for new providers
 
 ---
 
@@ -179,7 +208,7 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 
 - **API-driven multi-provider AI chat:** OpenAI, Anthropic, Gemini (per-user API keys)
 - **Command registry:** Chat, summarize, code search, repo summary, explain, translate, and more
-- **Integrations:** Google Drive, Gmail, GitHub (OAuth or token-based credentials)
+- **Integrations:** Google Drive, Gmail, GitHub, **Slack, Jira, Notion** (OAuth or token-based credentials)
 - **Smart intent parsing:** Natural language commands routed to the right provider/integration
 - **Chained commands:** Enter multi-step instructions in one message
 - **Workflow builder:** (optional) Visual multi-step, multi-provider workflows
@@ -277,7 +306,13 @@ Each provider entry lists the commands it supports:
   { "id": "openai",    "supportedCommands": ["chat","summarize","generate-code","explain","translate"] },
   { "id": "anthropic", "supportedCommands": ["chat","summarize","generate-code","explain","translate"] },
   { "id": "gemini",    "supportedCommands": ["chat","summarize","generate-code","explain","translate"] },
-  { "id": "github",    "supportedCommands": ["list-repos","get-file","repo-summary","code-search","generate-issue","generate-pr"] }
+  { "id": "github",    "supportedCommands": ["list-repos","get-file","repo-summary","code-search","generate-issue","generate-pr"] },
+  { "id": "slack",     "supportedCommands": ["send-message","list-channels","get-channel-history"] },
+  { "id": "jira",      "supportedCommands": ["list-projects","create-issue"] },
+  { "id": "notion",    "supportedCommands": ["list-databases","query-database"] },
+  { "id": "loveable",  "supportedCommands": ["summarize","translate"] },
+  { "id": "bolt",      "supportedCommands": ["summarize","translate"] },
+  { "id": "21st.dev",  "supportedCommands": ["summarize","translate"] }
 ]
 ```
 
