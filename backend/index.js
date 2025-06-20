@@ -15,10 +15,6 @@ import { open } from 'sqlite';
 import { jwtDecode } from "jwt-decode";
 import { parseIntent } from './parser.js';
 import crypto from 'crypto';
-import cursorProvider from './providers/cursor.js';
-import twentyFirstDevProvider from './providers/twentyFirstDev.js';
-import loveableProvider from './providers/loveable.js';
-import boltProvider from './providers/bolt.js';
 
 dotenv.config();
 
@@ -101,6 +97,13 @@ const MCP_COMMANDS = [
   { id: 'web-search', name: 'Web Search', description: 'Perform a web search via Bolt', providers: ['bolt'] },
   { id: 'figma-action', name: 'Figma Action', description: 'Interact with Figma via Bolt', providers: ['bolt'] },
   { id: 'custom-tool', name: 'Custom Tool', description: 'Run a custom Bolt tool', providers: ['bolt'] },
+  { id: 'send-message', name: 'Slack Send message', description: 'Send Slack message', providers: ['slack'] },
+  { id: 'list-channels', name: 'Slack List channels', description: 'List Slack channels', providers: ['slack'] },
+  { id: 'get-channel-history', name: 'Slack Get messages', description: 'Channel history', providers: ['slack'] },
+  { id: 'list-projects', name: 'Jira List projects', description: 'List Jira projects', providers: ['jira'] },
+  { id: 'create-issue', name: 'Jira Create issue', description: 'Create Jira issue', providers: ['jira'] },
+  { id: 'list-databases', name: 'Notion List DBs', description: 'List Notion databases', providers: ['notion'] },
+  { id: 'query-database', name: 'Notion Query DB', description: 'Query Notion database', providers: ['notion'] },
 ];
 
 // After the MCP_COMMANDS array is declared, insert the server version constant
@@ -886,6 +889,101 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
         console.error('[MCP Server] Zapier error:', err.message);
         return res.status(400).json({ error: err.message });
       }
+    } else if (provider === 'make_mcp_run') {
+      console.log('[MCP -> Make.com MCP run]');
+      const { zone, token, scenarioId } = req.body;
+      if (!zone || !token || !scenarioId) {
+        return res.status(400).json({ error: 'Missing required fields: zone, token, scenarioId' });
+      }
+      try {
+        const url = `https://${zone}/mcp/api/v1/u/${token}/execute/${scenarioId}`;
+        const r = await fetch(url, { headers: { Accept: 'text/event-stream' }, method: 'POST' });
+        return res.status(r.ok ? 202 : r.status).json({ ok: r.ok });
+      } catch (err) {
+        console.error('[MCP Server] Make.com execute error:', err.message);
+        return res.status(500).json({ ok: false, error: err.message });
+      }
+    } else if (provider === 'makecom') {
+      console.log(`[MCP -> Make.com] command=${command}`);
+      const makeToken = apiKey || req.body?.token || (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.replace('Bearer ', '') : '');
+      if (!makeToken) {
+        return res.status(401).json({ error: 'Missing Make.com API token' });
+      }
+      const zone = req.body?.zone || 'eu1'; // default to EU zone
+      const makeBase = `https://${zone}.make.com/api/v2`;
+      try {
+        // LIST SCENARIOS
+        if (command === 'list-scenarios' || /list\s+scenarios/i.test(command || formattedPrompt)) {
+          const resp = await fetch(`${makeBase}/scenarios`, {
+            headers: { Authorization: makeToken, Accept: 'application/json' }
+          });
+          const payload = await resp.json();
+          if (!resp.ok) {
+            return res.status(resp.status).json({ error: payload });
+          }
+          const list = (payload.scenarios || []).map(s => `${s.id}: ${s.name} (active: ${s.isActive})`).join('\n');
+          return res.json({ output: list || 'No scenarios found.', provider: 'makecom', command: 'list-scenarios', raw_response: payload });
+        }
+        // RUN SCENARIO <id>
+        if (/run\s+scenario/i.test(command || formattedPrompt) || command === 'run') {
+          const match = (command || formattedPrompt).match(/run\s+scenario\s+(\d+)/i);
+          const scenarioId = match?.[1] || req.body?.scenarioId;
+          if (!scenarioId) {
+            return res.status(400).json({ error: 'Missing scenarioId' });
+          }
+          const endpoint = `${makeBase}/scenarios/${scenarioId}/run`;
+          const resp = await fetch(endpoint, {
+            method: 'POST',
+            headers: {
+              Authorization: makeToken,
+              'Content-Type': 'application/json',
+              Accept: 'application/json'
+            },
+            body: JSON.stringify({ responsive: false })
+          });
+          const payload = await resp.json().catch(() => ({ text: 'Non-JSON response' }));
+          if (!resp.ok) {
+            return res.status(resp.status).json({ error: payload });
+          }
+          return res.json({ output: `Execution started (id: ${payload.executionId || 'n/a'})`, provider: 'makecom', command: `run-scenario-${scenarioId}`, raw_response: payload });
+        }
+        return res.status(400).json({ error: `Unsupported Make.com command: ${command}` });
+      } catch (err) {
+        console.error('[MCP Server] Make.com error:', err.message);
+        return res.status(400).json({ error: err.message });
+      }
+    } else if (provider === 'make_mcp_test') {
+      console.log(`[MCP -> Make.com MCP token test]`);
+      const { zone, token } = req.body;
+      if (!zone || !token) {
+        return res.status(400).json({ error: 'Missing required fields: zone and token' });
+      }
+      try {
+        const url = `https://${zone}/mcp/api/v1/u/${token}/sse`;
+        const r = await fetch(url, { headers: { Accept: 'text/event-stream' } });
+        return res.status(r.ok ? 200 : r.status).json({ ok: r.ok });
+      } catch (err) {
+        console.error('[MCP Server] Make.com test error:', err.message);
+        return res.status(500).json({ ok: false, error: err.message });
+      }
+    } else if (provider === 'make_webhook') {
+      // Trigger a classic Make.com webhook URL
+      const { url } = req.body;
+      if (!url || !/^https?:\/\/[^\s]*hook\./i.test(url)) {
+        return res.status(400).json({ error: 'Valid Make webhook URL required' });
+      }
+      try {
+        const r = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}'
+        });
+        const text = await r.text();
+        return res.status(r.status || 202).type('text').send(text || 'OK');
+      } catch (err) {
+        console.error('[MCP Server] Make.com webhook error:', err.message);
+        return res.status(500).json({ error: err.message || 'fetch failed' });
+      }
     } else if (provider === 'gmail') {
       console.log(`[MCP -> Gmail] command=${command}`);
       // Ensure we have fresh tokens in session if possible
@@ -894,6 +992,21 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       const accessToken = apiKey || bearerToken || (req.session.googleTokens?.access_token);
 
       const result = await gmailProviderPlugin.executeCommand({ command, prompt: formattedPrompt, apiKey: accessToken });
+      return res.json(result);
+    } else if (provider === 'slack') {
+      // fallback to stored token if apiKey omitted
+      if (!apiKey) {
+        const user = await getOrCreateUser();
+        apiKey = user.slackToken;
+      }
+      const result = await slackProvider.executeCommand({ command, params: req.body.params, apiKey });
+      return res.json(result);
+    } else if (provider === 'jira') {
+      const creds = { host: req.body.host, email: req.body.email, apiToken: apiKey };
+      const result = await jiraProvider.executeCommand({ command, params: req.body.params, credentials: creds });
+      return res.json(result);
+    } else if (provider === 'notion') {
+      const result = await notionProvider.executeCommand({ command, params: req.body.params, apiKey });
       return res.json(result);
     } else if (provider === 'cursor') {
       console.log(`[MCP -> Cursor] command=${command}`);
@@ -1019,7 +1132,8 @@ let db;
       n8nUrl TEXT,
       n8nSecret TEXT,
       googleRefreshToken TEXT,
-      githubPAT TEXT
+      githubPAT TEXT,
+      slackToken TEXT
     );
     CREATE TABLE IF NOT EXISTS Webhook (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1153,6 +1267,16 @@ app.get(['/commands', '/api/commands'], (req, res) => {
   res.json(MCP_COMMANDS);
 });
 
+// NEW: "/schema" endpoint for autocomplete with caching
+app.get('/schema', (req, res) => {
+  // 1-hour client cache so the Hub can poll every 60 min without redownloading if unchanged
+  res.set({
+    'Cache-Control': 'public, max-age=3600',
+    'MCP-Server-Version': MCP_SERVER_VERSION
+  });
+  res.json(MCP_COMMANDS);
+});
+
 // Helper to fetch single user row (id=1) or create if missing
 async function getOrCreateUser() {
   let user = await db.get('SELECT * FROM User LIMIT 1');
@@ -1234,6 +1358,38 @@ app.delete('/api/user/github-token', async (req, res) => {
   try {
     const user = await getOrCreateUser();
     await db.run('UPDATE User SET githubPAT = NULL WHERE id = ?', user.id);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// --- Slack Bot token storage endpoints ---
+app.get('/api/user/slack-token', async (req, res) => {
+  try {
+    const user = await getOrCreateUser();
+    res.json({ token: user.slackToken || '' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/user/slack-token', express.json(), async (req, res) => {
+  const { token } = req.body;
+  if (!token) return res.status(400).json({ error: 'Missing token' });
+  try {
+    const user = await getOrCreateUser();
+    await db.run('UPDATE User SET slackToken = ? WHERE id = ?', token, user.id);
+    res.json({ saved: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.delete('/api/user/slack-token', async (req, res) => {
+  try {
+    const user = await getOrCreateUser();
+    await db.run('UPDATE User SET slackToken = NULL WHERE id = ?', user.id);
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
