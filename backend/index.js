@@ -17,6 +17,9 @@ import { parseIntent } from './parser.js';
 import crypto from 'crypto';
 import { getCredentials as daoGetCredentials, saveCredentials as daoSaveCredentials, deleteCredentials as daoDeleteCredentials } from './services/credentialDao.js';
 import slackProvider from './providers/slack.js';
+import cursorProvider from './providers/cursor.js';
+import twentyFirstDevProvider from './providers/twentyFirstDev.js';
+import boltProvider from './providers/bolt.js';
 
 dotenv.config();
 
@@ -93,9 +96,6 @@ const MCP_COMMANDS = [
   { id: 'upload-file',   name: 'Upload Drive File',     description: 'Upload a new file to Drive', providers: ['google_drive'] },
   { id: 'list-events', name: 'List Calendar Events', description: 'List today\'s Google Calendar events', providers: ['google_calendar'] },
   { id: 'generate-ui-component', name: 'Generate UI Component', description: 'Generate front-end UI component code', providers: ['21st_dev'] },
-  { id: 'create-project', name: 'Create Project', description: 'Create a Supabase project via Loveable', providers: ['loveable'] },
-  { id: 'manage-database', name: 'Manage Database', description: 'Run database operations', providers: ['loveable'] },
-  { id: 'deploy', name: 'Deploy', description: 'Deploy project via Loveable', providers: ['loveable'] },
   { id: 'web-search', name: 'Web Search', description: 'Perform a web search via Bolt', providers: ['bolt'] },
   { id: 'figma-action', name: 'Figma Action', description: 'Interact with Figma via Bolt', providers: ['bolt'] },
   { id: 'custom-tool', name: 'Custom Tool', description: 'Run a custom Bolt tool', providers: ['bolt'] },
@@ -439,12 +439,6 @@ app.get('/api/providers', (req, res) => {
       requiresApiKey: true
     },
     {
-      id: loveableProvider.id,
-      name: loveableProvider.name,
-      supportedCommands: loveableProvider.supportedCommands,
-      requiresApiKey: true
-    },
-    {
       id: boltProvider.id,
       name: boltProvider.name,
       supportedCommands: boltProvider.supportedCommands,
@@ -483,9 +477,6 @@ app.get('/api/providers/:providerId/resources', async (req, res) => {
       res.json({ resources });
     } else if (providerId === '21st_dev') {
       const resources = await twentyFirstDevProvider.listResources({ apiKey });
-      res.json({ resources });
-    } else if (providerId === 'loveable') {
-      const resources = await loveableProvider.listResources({ apiKey });
       res.json({ resources });
     } else if (providerId === 'bolt') {
       const resources = await boltProvider.listResources({ apiKey });
@@ -707,35 +698,67 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       if (!anthropicApiKey) {
         return res.status(400).json({ error: 'No Anthropic API key provided.' });
       }
-      // Limit messages to last 10
-      let messages = Array.isArray(req.body.messages) ? req.body.messages.slice(-HISTORY_LIMIT) : [{ role: 'user', content: formattedPrompt }];
-      // Format messages for Claude 3 API
-      const claudeMessages = messages.map(m => ({
-        role: m.role,
-        content: m.content
-      }));
-      const anthropicRes = await time('Anthropic API', () => fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'x-api-key': anthropicApiKey,
-          'anthropic-version': '2023-06-01',
-          'content-type': 'application/json'
-        },
-        body: JSON.stringify({
+
+      const isApi03 = anthropicApiKey.startsWith('sk-ant-api');
+
+      // Build payload
+      let url = 'https://api.anthropic.com/v1/messages';
+      let headers = {
+        'content-type': 'application/json'
+      };
+
+      if (isApi03) {
+        headers['x-api-key'] = anthropicApiKey;
+        headers['anthropic-version'] = '2023-06-01';
+      } else {
+        // legacy
+        url = 'https://api.anthropic.com/v1/complete';
+        headers['Authorization'] = `Bearer ${anthropicApiKey}`;
+      }
+
+      // Limit messages/history
+      let messagesArr = Array.isArray(req.body.messages)
+        ? req.body.messages.slice(-HISTORY_LIMIT)
+        : [{ role: 'user', content: formattedPrompt }];
+
+      let body;
+      if (isApi03) {
+        const claudeMessages = messagesArr.map(m => ({ role: m.role, content: m.content }));
+        body = {
           model: 'claude-3-opus-20240229',
-          max_tokens: 256,
+          max_tokens: 512,
           messages: claudeMessages
-        })
+        };
+      } else {
+        // Convert messages to single prompt string
+        const promptStr = messagesArr.map(m => `${m.role === 'user' ? '' : 'Assistant:'} ${m.content}`).join('\n');
+        body = {
+          prompt: promptStr,
+          model: 'claude-v1',
+          max_tokens_to_sample: 512
+        };
+      }
+
+      const anthropicRes = await time('Anthropic API', () => fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
       }));
       if (!anthropicRes.ok) {
         const err = await anthropicRes.text();
         return res.status(400).json({ error: 'Anthropic API error', details: err });
       }
       const data = await anthropicRes.json();
-      // Claude 3: content is an array of {type, text}
+
       let reply = '';
-      if (data.content && Array.isArray(data.content)) {
-        reply = data.content.map(part => part.text).join(' ');
+      if (isApi03) {
+        // Claude 3 messages response
+        if (data.content && Array.isArray(data.content)) {
+          reply = data.content.map(part => part.text).join(' ');
+        }
+      } else {
+        // legacy complete response
+        reply = data.completion || data.text || '';
       }
       return res.json({
         output: reply || 'No response from Anthropic.',
@@ -1063,10 +1086,6 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
     } else if (provider === '21st_dev') {
       console.log(`[MCP -> 21st DEV] command=${command}`);
       const result = await twentyFirstDevProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
-      return res.json(result);
-    } else if (provider === 'loveable') {
-      console.log(`[MCP -> Loveable] command=${command}`);
-      const result = await loveableProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
       return res.json(result);
     } else if (provider === 'bolt') {
       console.log(`[MCP -> Bolt] command=${command}`);
@@ -1447,7 +1466,8 @@ app.get('/api/credentials/:providerId', async (req, res) => {
   if (!providerId) return res.status(400).json({ error: 'Missing providerId' });
   try {
     const credentials = await daoGetCredentials(providerId);
-    return res.json({ credentials });
+    const decrypted = decryptCredentialsObj(credentials);
+    return res.json({ credentials: decrypted });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }
@@ -1459,7 +1479,8 @@ app.post('/api/credentials/:providerId', express.json(), async (req, res) => {
   const { credentials } = req.body || {};
   if (!credentials || typeof credentials !== 'object') return res.status(400).json({ error: 'Missing credentials object' });
   try {
-    await daoSaveCredentials(providerId, credentials);
+    const encrypted = encryptCredentialsObj(credentials);
+    await daoSaveCredentials(providerId, encrypted);
     return res.json({ saved: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -1653,7 +1674,7 @@ app.post('/api/validate-key', express.json(), async (req, res) => {
       const resp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
       return res.json({ valid: resp.ok });
     }
-    if (provider === 'cursor' || provider === '21st_dev' || provider === 'loveable' || provider === 'bolt') {
+    if (provider === 'cursor' || provider === '21st_dev' || provider === 'bolt') {
       // TODO: Implement real validation once provider APIs are available.
       // For now, treat any non-empty key as valid.
       const valid = typeof apiKey === 'string' && apiKey.trim().length > 0;
@@ -1832,5 +1853,45 @@ const PROVIDER_ALIASES = {
 };
 function canonicalProvider(id = '') {
   return PROVIDER_ALIASES[id] || id;
+}
+
+// ── Global Error Handler ───────────────────────────────
+// Centralized error handling so that uncaught errors in any route
+// are logged consistently and a JSON response is returned.
+app.use((err, req, res, next) => {
+  console.error('[Error]', err.stack || err);
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: err?.message || 'Internal server error' });
+});
+
+// Helper: encrypt all string properties in a plain object (shallow)
+function encryptCredentialsObj(obj = {}) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string') {
+      out[k] = encryptValue(v);
+    } else if (Array.isArray(v)) {
+      out[k] = v.map(item => typeof item === 'string' ? encryptValue(item) : item);
+    } else {
+      out[k] = v; // leave non-strings untouched (or nested objs as-is)
+    }
+  }
+  return out;
+}
+
+function decryptCredentialsObj(obj = {}) {
+  if (!obj || typeof obj !== 'object') return obj;
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (typeof v === 'string') {
+      out[k] = decryptValue(v);
+    } else if (Array.isArray(v)) {
+      out[k] = v.map(item => typeof item === 'string' ? decryptValue(item) : item);
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 

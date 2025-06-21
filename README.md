@@ -59,6 +59,49 @@
    ```
 2. Run `npm install` inside `backend/` to pull new dependencies: `@slack/web-api`, `@supabase/supabase-js`, `@notionhq/client`, `axios`.
 
+## Changelog – 2025-06-21
+
+### Backend
+- **Anthropic v1/messages support** – automatically detects new `sk-ant-api03-…` keys and uses `x-api-key` header + `/v1/messages` endpoint; legacy keys continue to work.
+- Generic `/api/credentials/:providerId` route now encrypts **all** string fields with AES-256-GCM, matching GitHub/Slack behaviour.
+- Added `/api/health` route to exported POST list; header badge polls this every 5 s.
+
+### Front-End
+- New `useProviders` hook subscribes to Supabase Realtime on `user_integration_accounts`; provider badges flip live across tabs/devices.
+- Settings modal now saves credentials via the encrypted credentials endpoint; localStorage removed.
+- Added **Vite dev proxy** recommendation (see Dev Notes) so FE ↔ BE share the same origin in dev & prod and CORS is eliminated.
+
+### Dev Notes
+1. **Run the whole stack**
+   ```bash
+   # project root
+   npm install        # pulls @supabase/supabase-js + concurrently
+   npm run dev:all    # Vite on 5174 + backend on 3002 (via `dev:backend`)
+   ```
+2. **Vite proxy (add to `vite.config.ts`)**
+   ```ts
+   server: {
+     proxy: {
+       '/api': 'http://localhost:3002',
+       '/mcp': 'http://localhost:3002',
+     }
+   }
+   ```
+3. **Environment (.env)**
+   ```env
+   # front-end
+   VITE_SUPABASE_URL=…
+   VITE_SUPABASE_ANON_KEY=…
+
+   # back-end
+   PORT=3002
+   CORS_ORIGINS=http://localhost:5173,http://localhost:5174,http://localhost:5175
+   ENCRYPTION_KEY=<64-char hex>
+   SUPABASE_URL=…
+   SUPABASE_SERVICE_ROLE_KEY=…
+   ```
+4. **Supabase DB** – table `public.user_integration_accounts` with PK `(user_id,provider)` and RLS policy `upsert_own_credentials` must be enabled; realtime publication on this table must stay ON.
+
 ---
 
 ## Quick Command Cheat-Sheet  

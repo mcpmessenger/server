@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { Provider } from '../types';
+import { supabase } from '../services/supabaseClient';
 
 const defaultProviders: Provider[] = [
   {
@@ -99,14 +100,6 @@ const defaultProviders: Provider[] = [
     requestCount: 0
   },
   {
-    id: 'loveable',
-    name: 'Loveable',
-    status: 'disconnected',
-    color: 'from-pink-500 to-red-400',
-    icon: 'Heart',
-    requestCount: 0
-  },
-  {
     id: 'bolt',
     name: 'Bolt',
     status: 'disconnected',
@@ -121,61 +114,161 @@ const defaultProviders: Provider[] = [
     color: 'from-green-400 to-blue-500',
     icon: 'Globe',
     requestCount: 0
+  },
+  {
+    id: 'slack',
+    name: 'Slack',
+    status: 'disconnected',
+    color: 'from-gray-700 to-black',
+    icon: 'Bot',
+    requestCount: 0
   }
 ];
 
 export const useProviders = () => {
-  const [providers, setProviders] = useState<Provider[]>(() => {
-    // Load providers from localStorage
-    const saved = localStorage.getItem('mcp-providers');
-    let merged = defaultProviders;
-    if (saved) {
-      try {
-        const savedArr: Provider[] = JSON.parse(saved);
-        // Merge by id: keep any custom fields from saved (apiKey, requestCount, etc.)
-        merged = defaultProviders.map(def => {
-          const match = savedArr.find(s => s.id === def.id);
-          return match ? { ...def, ...match } : def;
-        });
-      } catch (error) {
-        console.error('Failed to parse saved providers:', error);
-      }
-    }
-    // Load GitHub token from localStorage if present
-    const githubToken = localStorage.getItem('githubToken') || '';
-    merged = merged.map(p =>
-      p.id === 'github' ? { ...p, apiKey: githubToken, status: githubToken ? 'connected' : 'disconnected' } : p
-    );
-    // Persist back (drops unknown providers)
-    localStorage.setItem('mcp-providers', JSON.stringify(merged));
-    return merged;
-  });
+  const [providers, setProviders] = useState<Provider[]>(defaultProviders);
 
   const updateProvider = (id: string, updates: Partial<Provider>) => {
     setProviders(prev => {
       const updated = prev.map(p => 
         p.id === id ? { ...p, ...updates } : p
       );
-      localStorage.setItem('mcp-providers', JSON.stringify(updated));
       return updated;
     });
   };
 
-  const setApiKey = (providerId: string, apiKey: string) => {
-    const status = apiKey ? 'pending' : 'disconnected';
-    updateProvider(providerId, { apiKey, status });
-    if (providerId === 'github') {
-      if (apiKey) {
-        localStorage.setItem('githubToken', apiKey);
+  const setApiKey = async (providerId: string, apiKey: string) => {
+    // Optimistic UI update
+    updateProvider(providerId, { apiKey, status: apiKey ? 'pending' : 'disconnected' });
+
+    try {
+      // Persist to backend so all devices get Realtime event
+      if (providerId === 'github' || providerId === 'slack') {
+        // Dedicated endpoint handles encryption server-side
+        const endpoint = providerId === 'github' ? '/api/user/github-token' : '/api/user/slack-token';
+        if (apiKey) {
+          await fetch(endpoint, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ token: apiKey })
+          });
+        } else {
+          await fetch(endpoint, { method: 'DELETE' });
+        }
       } else {
-        localStorage.removeItem('githubToken');
+        // Generic credentials endpoint (stores plaintext as-is; server may encrypt)
+        const method = apiKey ? 'POST' : 'DELETE';
+        const body = apiKey ? JSON.stringify({ credentials: { apiKey } }) : undefined;
+        await fetch(`/api/credentials/${providerId}`, {
+          method,
+          headers: apiKey ? { 'Content-Type': 'application/json' } : undefined,
+          body
+        });
       }
+    } catch (err) {
+      console.error('Failed to save credentials', err);
+      updateProvider(providerId, { status: 'error' });
     }
   };
 
   const setStatus = (providerId: string, status: Provider['status']) => {
     updateProvider(providerId, { status });
   };
+
+  // On mount: fetch stored credentials for providers that rely on backend storage (e.g., GitHub)
+  useEffect(() => {
+    const fetchInitialCreds = async () => {
+      try {
+        const res = await fetch('/api/user/github-token');
+        const data = await res.json();
+        if (data.token) {
+          updateProvider('github', { apiKey: data.token, status: 'connected' });
+        }
+      } catch (err) {
+        console.warn('No GitHub token');
+      }
+
+      try {
+        const res = await fetch('/api/user/slack-token');
+        const data = await res.json();
+        if (data.token) {
+          updateProvider('slack', { apiKey: data.token, status: 'connected' });
+        }
+      } catch (err) {
+        console.warn('No Slack token');
+      }
+
+      // Generic loop for any other providers that may have stored apiKey
+      const others = defaultProviders
+        .map(p => p.id)
+        .filter(id => id !== 'github' && id !== 'slack');
+      for (const pid of others) {
+        try {
+          const res = await fetch(`/api/credentials/${pid}`);
+          const data = await res.json();
+          if (data.credentials && data.credentials.apiKey) {
+            updateProvider(pid, { apiKey: data.credentials.apiKey, status: 'connected' });
+          }
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+    fetchInitialCreds();
+  }, []);
+
+  useEffect(() => {
+    if (!supabase) return;
+
+    const channel = supabase.channel('mcp-credentials')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'user_integration_accounts' },
+        async (payload: any) => {
+          const providerId = payload.new?.provider || payload.old?.provider;
+          if (!providerId) return;
+          try {
+            const res = await fetch(`/api/${providerId}/status`);
+            const json = await res.json();
+            if (!json) return;
+            const status: Provider['status'] = json.connected ? 'connected' : 'disconnected';
+            const updates: Partial<Provider> = { status };
+            if (providerId === 'github' && status === 'connected') {
+              // fetch token so this tab has plaintext for future requests
+              try {
+                const tokRes = await fetch('/api/user/github-token');
+                const tokData = await tokRes.json();
+                if (tokData.token) updates.apiKey = tokData.token;
+              } catch {}
+            }
+            if (providerId === 'slack' && status === 'connected') {
+              try {
+                const tokRes = await fetch('/api/user/slack-token');
+                const tokData = await tokRes.json();
+                if (tokData.token) updates.apiKey = tokData.token;
+              } catch {}
+            }
+            if (!updates.apiKey && status === 'connected') {
+              try {
+                const credRes = await fetch(`/api/credentials/${providerId}`);
+                const credJson = await credRes.json();
+                if (credJson.credentials && credJson.credentials.apiKey) {
+                  updates.apiKey = credJson.credentials.apiKey;
+                }
+              } catch {}
+            }
+            updateProvider(providerId, updates);
+          } catch (err) {
+            console.error('Realtime status fetch failed', err);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      channel.unsubscribe();
+    };
+  }, [updateProvider]);
 
   return {
     providers,

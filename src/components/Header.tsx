@@ -25,8 +25,9 @@ export const Header: React.FC<{
   };
 
   useEffect(() => {
+    const apiBase = import.meta.env.VITE_MCP_API || '';
     const checkHealth = () => {
-      fetch('http://localhost:3001/api/health')
+      fetch(`${apiBase}/api/health`)
         .then(res => res.ok ? setServerOnline(true) : setServerOnline(false))
         .catch(() => setServerOnline(false));
     };
