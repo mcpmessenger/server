@@ -20,6 +20,10 @@ import slackProvider from './providers/slack.js';
 import cursorProvider from './providers/cursor.js';
 import twentyFirstDevProvider from './providers/twentyFirstDev.js';
 import boltProvider from './providers/bolt.js';
+// ─── Jira & Notion providers ──────────────────────────────
+import jiraProvider from './providers/jira.js';
+import notionProvider from './providers/notion.js';
+import axios from 'axios';
 
 dotenv.config();
 
@@ -71,6 +75,162 @@ const GOOGLE_SCOPES = [
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID;
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET;
 const GITHUB_CALLBACK = 'http://localhost:3001/auth/github/callback';
+
+// --- Atlassian Jira OAuth (PKCE) & Notion OAuth --------------------------------
+const ATLASSIAN_CLIENT_ID = process.env.ATLASSIAN_CLIENT_ID || '';
+const JIRA_SCOPES = 'read:jira-user read:jira-work write:jira-work offline_access';
+const JIRA_REDIRECT_URI = process.env.JIRA_REDIRECT_URI || 'http://localhost:3001/api/auth/jira/callback';
+
+const NOTION_CLIENT_ID = process.env.NOTION_CLIENT_ID || '';
+const NOTION_CLIENT_SECRET = process.env.NOTION_CLIENT_SECRET || '';
+const NOTION_REDIRECT_URI = process.env.NOTION_REDIRECT_URI || 'http://localhost:3001/api/auth/notion/callback';
+
+// PKCE helpers for Atlassian
+function base64urlEncode(buf) {
+  return buf.toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+function generateCodeVerifier() {
+  return base64urlEncode(crypto.randomBytes(32));
+}
+function sha256(buffer) {
+  return crypto.createHash('sha256').update(buffer).digest();
+}
+function generateCodeChallenge(verifier) {
+  return base64urlEncode(sha256(Buffer.from(verifier)));
+}
+
+// ─── Jira OAuth endpoints ────────────────────────────────
+app.get('/api/auth/jira/url', (req, res) => {
+  if (!ATLASSIAN_CLIENT_ID) return res.status(500).json({ error: 'Missing ATLASSIAN_CLIENT_ID' });
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = generateCodeChallenge(codeVerifier);
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.jiraOauth = { codeVerifier, state };
+  const params = new URLSearchParams({
+    audience: 'api.atlassian.com',
+    client_id: ATLASSIAN_CLIENT_ID,
+    scope: JIRA_SCOPES,
+    redirect_uri: JIRA_REDIRECT_URI,
+    state,
+    response_type: 'code',
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    prompt: 'consent'
+  });
+  res.json({ url: `https://auth.atlassian.com/authorize?${params.toString()}` });
+});
+
+app.get('/api/auth/jira/callback', async (req, res) => {
+  try {
+    const { code, state } = req.query;
+    if (!code || !state) return res.status(400).send('Missing code/state');
+    if (!req.session.jiraOauth || req.session.jiraOauth.state !== state) {
+      return res.status(400).send('Invalid state');
+    }
+    const { codeVerifier } = req.session.jiraOauth;
+    delete req.session.jiraOauth;
+    // Exchange code → tokens
+    const tokenResp = await axios.post('https://auth.atlassian.com/oauth/token', {
+      grant_type: 'authorization_code',
+      client_id: ATLASSIAN_CLIENT_ID,
+      code,
+      redirect_uri: JIRA_REDIRECT_URI,
+      code_verifier: codeVerifier
+    }, { headers: { 'Content-Type': 'application/json' } });
+
+    const { access_token, refresh_token, expires_in, scope } = tokenResp.data;
+    // Determine cloudId
+    const res2 = await axios.get('https://api.atlassian.com/oauth/token/accessible-resources', {
+      headers: { Authorization: `Bearer ${access_token}` }
+    });
+    const cloudId = Array.isArray(res2.data) && res2.data[0]?.id;
+
+    await daoSaveCredentials('jira', encryptCredentialsObj({
+      access_token,
+      refresh_token,
+      expires_at: Date.now() + expires_in * 1000,
+      scope,
+      cloud_id: cloudId
+    }));
+    broadcastEvent('token-connect', { provider: 'jira' });
+    const redirect = (process.env.CORS_ORIGINS || 'http://localhost:5173').split(',')[0] + '/integrations?provider=jira&status=success';
+    return res.redirect(302, redirect);
+  } catch (err) {
+    console.error('[Jira OAuth] callback', err.message);
+    res.status(500).send('Jira OAuth failed');
+  }
+});
+
+// Helper to ensure Jira token freshness
+async function ensureJiraAccessToken() {
+  let stored = await daoGetCredentials('jira');
+  if (!stored) return null;
+  stored = decryptCredentialsObj(stored);
+  if (!stored.access_token) return null;
+  const FIVE_MIN = 5 * 60 * 1000;
+  if (stored.expires_at && stored.expires_at - Date.now() < FIVE_MIN) {
+    try {
+      const r = await axios.post('https://auth.atlassian.com/oauth/token', {
+        grant_type: 'refresh_token',
+        client_id: ATLASSIAN_CLIENT_ID,
+        refresh_token: stored.refresh_token
+      }, { headers: { 'Content-Type': 'application/json' } });
+      const { access_token, refresh_token, expires_in } = r.data;
+      stored.access_token = access_token;
+      if (refresh_token) stored.refresh_token = refresh_token;
+      stored.expires_at = Date.now() + expires_in * 1000;
+      await daoSaveCredentials('jira', encryptCredentialsObj(stored));
+      broadcastEvent('token-refresh', { provider: 'jira', refreshed: true });
+    } catch (e) {
+      console.error('[Jira] refresh failed', e.message);
+    }
+  }
+  return { accessToken: stored.access_token, cloudId: stored.cloud_id };
+}
+
+// ─── Notion OAuth endpoints ──────────────────────────────
+app.get('/api/auth/notion/url', (req, res) => {
+  if (!NOTION_CLIENT_ID) return res.status(500).json({ error: 'Missing NOTION_CLIENT_ID' });
+  const state = crypto.randomBytes(16).toString('hex');
+  req.session.notionState = state;
+  const params = new URLSearchParams({
+    client_id: NOTION_CLIENT_ID,
+    redirect_uri: NOTION_REDIRECT_URI,
+    response_type: 'code',
+    owner: 'user',
+    state
+  });
+  res.json({ url: `https://api.notion.com/v1/oauth/authorize?${params.toString()}` });
+});
+
+app.get('/api/auth/notion/callback', async (req, res) => {
+  const { code, state } = req.query;
+  if (!code || !state) return res.status(400).send('Missing code/state');
+  if (state !== req.session.notionState) return res.status(400).send('Invalid state');
+  delete req.session.notionState;
+  try {
+    const tokenResp = await axios.post('https://api.notion.com/v1/oauth/token', {
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: NOTION_REDIRECT_URI,
+      client_id: NOTION_CLIENT_ID,
+      client_secret: NOTION_CLIENT_SECRET
+    }, { headers: { 'Content-Type': 'application/json' } });
+
+    const { access_token, bot_id, workspace_id } = tokenResp.data;
+    await daoSaveCredentials('notion', encryptCredentialsObj({
+      access_token,
+      bot_id,
+      workspace_id
+    }));
+    broadcastEvent('token-connect', { provider: 'notion' });
+    const redirect = (process.env.CORS_ORIGINS || 'http://localhost:5173').split(',')[0] + '/integrations?provider=notion&status=success';
+    res.redirect(302, redirect);
+  } catch (err) {
+    console.error('[Notion OAuth] callback error', err.message);
+    res.status(500).send('Notion OAuth failed');
+  }
+});
 
 // --- MCP Protocol Implementation ---
 
@@ -455,6 +615,12 @@ app.get('/api/providers', (req, res) => {
       name: gmailProviderPlugin.name,
       supportedCommands: gmailProviderPlugin.supportedCommands,
       requiresApiKey: true
+    },
+    {
+      id: notionProvider.id,
+      name: 'Notion',
+      supportedCommands: notionProvider.supportedCommands,
+      requiresApiKey: true
     }
   ];
   res.json(providers);
@@ -480,6 +646,9 @@ app.get('/api/providers/:providerId/resources', async (req, res) => {
       res.json({ resources });
     } else if (providerId === 'bolt') {
       const resources = await boltProvider.listResources({ apiKey });
+      res.json({ resources });
+    } else if (providerId === 'notion') {
+      const resources = await notionProvider.listResources({ apiKey });
       res.json({ resources });
     } else {
       res.status(400).json({ error: 'Provider does not support resource listing' });
@@ -1073,12 +1242,27 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       const result = await slackProvider.executeCommand({ command, params: req.body.params, apiKey });
       return res.json(result);
     } else if (provider === 'jira') {
-      const creds = { host: req.body.host, email: req.body.email, apiToken: apiKey };
-      const result = await jiraProvider.executeCommand({ command, params: req.body.params, credentials: creds });
+      let credentials;
+      if (req.body.host && req.body.email && apiKey) {
+        // Legacy basic auth (self-hosted Jira)
+        credentials = { host: req.body.host, email: req.body.email, apiToken: apiKey };
+      } else {
+        // Modern Cloud OAuth
+        const jiraAuth = await ensureJiraAccessToken();
+        if (!jiraAuth) return res.status(400).json({ error: 'Jira not connected' });
+        credentials = { accessToken: jiraAuth.accessToken, cloudId: jiraAuth.cloudId };
+      }
+      const result = await jiraProvider.executeCommand({ command, params: req.body.params, credentials });
       return res.json(result);
     } else if (provider === 'notion') {
-      const result = await notionProvider.executeCommand({ command, params: req.body.params, apiKey });
-      return res.json(result);
+      if (!apiKey) return res.status(400).json({ ok:false, code:'AUTH_REQUIRED', message:'Notion not connected' });
+      try {
+        const result = await notionProvider.executeCommand({ command, params: req.body.params, apiKey });
+        return res.json(result);
+      } catch (err) {
+        console.error('[MCP/Notion]', err.message);
+        return res.status(400).json({ ok:false, code:'NOTION_ERROR', message: err.message });
+      }
     } else if (provider === 'cursor') {
       console.log(`[MCP -> Cursor] command=${command}`);
       const result = await cursorProvider.executeCommand({ command, prompt: formattedPrompt, apiKey });
@@ -1095,6 +1279,7 @@ app.post(['/api/command', '/command'], requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Unsupported provider' });
     }
   } catch (err) {
+    console.error('[/api/command] unexpected', err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1894,4 +2079,47 @@ function decryptCredentialsObj(obj = {}) {
   }
   return out;
 }
+
+// --- Notion proxy to bypass CORS (server-side pass-through) ---
+const NOTION_API_BASE = 'https://api.notion.com/v1';
+const NOTION_VERSION = '2022-06-28';
+
+app.post(['/proxy/notion','/api/proxy/notion'], express.json({ limit: '10mb' }), async (req, res) => {
+  try {
+    const { path = '', method = 'GET', body = null, apiKey } = req.body || {};
+    if (!path) return res.status(400).json({ ok:false, code:'VALIDATION', message:'Missing "path" body param' });
+
+    // Resolve access token (Bearer)
+    let token = apiKey;
+    if (!token) {
+      const stored = await daoGetCredentials('notion');
+      if (stored) {
+        const dec = decryptCredentialsObj(stored);
+        token = dec.access_token;
+      }
+    }
+    if (!token) return res.status(401).json({ ok:false, code:'AUTH_REQUIRED', message:'Notion integration not connected' });
+
+    const upstreamUrl = `${NOTION_API_BASE}/${path.replace(/^\/+/, '')}`;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Notion-Version': NOTION_VERSION,
+      'Content-Type': 'application/json'
+    };
+
+    const upstreamResp = await fetch(upstreamUrl, {
+      method: method.toUpperCase(),
+      headers,
+      body: method.toUpperCase() === 'GET' ? undefined : JSON.stringify(body || {})
+    });
+
+    const isJson = upstreamResp.headers.get('content-type')?.includes('application/json');
+    const payload = isJson ? await upstreamResp.json().catch(async () => ({ raw: await upstreamResp.text() })) : await upstreamResp.text();
+
+    res.status(upstreamResp.status).json(payload);
+  } catch (err) {
+    console.error('[Proxy/Notion] error', err);
+    res.status(500).json({ ok:false, code:'SERVER', message:err.message });
+  }
+});
 

@@ -68,7 +68,7 @@ const defaultProviders: Provider[] = [
     requestCount: 0
   },
   {
-    id: 'make',
+    id: 'makecom',
     name: 'Make.com',
     status: 'disconnected',
     color: 'from-purple-500 to-pink-600',

@@ -59,6 +59,13 @@ export function parseIntent(input = '') {
     else if (/trigger\s+zap/.test(lower)) command = 'trigger';
   }
 
+  // Make.com
+  if (!provider && (/make\.com/.test(lower) || /^\/make/.test(lower))) {
+    provider = 'makecom';
+    if (/list\s+scenarios/.test(lower)) command = 'list-scenarios';
+    else if (/run\s+scenario/.test(lower)) command = 'run';
+  }
+
   // Generic LLM utility commands (no explicit provider = uses whatever LLM is selected)
   if (!command) {
     if (/\b(summarize|summary|summarise)\b/.test(lower)) command = 'summarize';

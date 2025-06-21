@@ -1,28 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { Activity, Globe, Settings, Moon, Sun, MinusCircle, Bot, Zap, Sparkles, Github } from 'lucide-react';
-import { useProviders } from '../hooks/useProviders';
+import { Activity, Globe, Settings, MinusCircle } from 'lucide-react';
 
 export const Header: React.FC<{
   onSettings?: () => void;
-  darkMode: boolean;
-  setDarkMode: (val: boolean) => void;
   onMinimizeChat?: () => void;
   onGoogleConnect?: () => void;
   onGitHubConnect?: () => void;
-}> = ({ onSettings, darkMode, setDarkMode, onMinimizeChat, onGoogleConnect, onGitHubConnect }) => {
+}> = ({ onSettings, onMinimizeChat, onGoogleConnect, onGitHubConnect }) => {
   const [serverOnline, setServerOnline] = useState(true);
-  const { providers } = useProviders();
-
-  // Map provider icon string to Lucide icon
-  const iconMap = { Bot, Zap, Sparkles, Github, Globe };
-
-  // Carousel click handlers
-  const handleIconClick = (id: string) => {
-    if (id === 'google' && onGoogleConnect) onGoogleConnect();
-    else if (id === 'github' && onGitHubConnect) onGitHubConnect();
-    else if (id === 'settings' && onSettings) onSettings();
-    // Add more as needed
-  };
 
   useEffect(() => {
     const apiBase = import.meta.env.VITE_MCP_API || '';
@@ -56,27 +41,24 @@ export const Header: React.FC<{
                 <span>{serverOnline ? 'Server: Running' : 'Server: Offline'}</span>
                 <div className={`w-2 h-2 rounded-full animate-pulse ${serverOnline ? 'bg-green-500' : 'bg-red-500'}`} />
               </div>
-              <button
-                className="p-2 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
-                onClick={() => setDarkMode(!darkMode)}
-                aria-label="Toggle dark mode"
-              >
-                {darkMode ? <Sun className="w-5 h-5 text-yellow-400" /> : <Moon className="w-5 h-5 text-gray-600" />}
-              </button>
-              <button
-                className="p-2 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
-                onClick={onMinimizeChat}
-                aria-label="Minimize chat"
-              >
-                <MinusCircle className="w-5 h-5 text-gray-600 dark:text-gray-300" />
-              </button>
-              <button
-                className="p-2 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
-                onClick={onSettings}
-                aria-label="Settings"
-              >
-                <Settings className="w-5 h-5 text-gray-600 dark:text-gray-300" />
-              </button>
+              {onMinimizeChat && (
+                <button
+                  className="p-2 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                  onClick={onMinimizeChat}
+                  aria-label="Minimize chat"
+                >
+                  <MinusCircle className="w-5 h-5 text-gray-600 dark:text-gray-300" />
+                </button>
+              )}
+              {onSettings && (
+                <button
+                  className="p-2 hover:bg-gray-100 dark:hover:bg-neutral-800 rounded-lg transition-colors"
+                  onClick={onSettings}
+                  aria-label="Settings"
+                >
+                  <Settings className="w-5 h-5 text-gray-600 dark:text-gray-300" />
+                </button>
+              )}
             </div>
           </div>
         </div>

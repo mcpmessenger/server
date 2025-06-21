@@ -59,6 +59,31 @@
    ```
 2. Run `npm install` inside `backend/` to pull new dependencies: `@slack/web-api`, `@supabase/supabase-js`, `@notionhq/client`, `axios`.
 
+## Changelog – 2025-06-22
+
+### Backend
+• **Jira Cloud OAuth (PKCE)** – endpoints
+  * `GET  /api/auth/jira/url` → returns the Atlassian authorize URL (code challenge stored in session).
+  * `GET  /api/auth/jira/callback` → exchanges code → access/refresh, discovers `cloudId`, encrypts & saves tokens.
+  * Helper `ensureJiraAccessToken()` auto-refreshes and injects Bearer tokens for all Jira commands.
+
+• **Notion OAuth (3-LO)** – endpoints
+  * `GET  /api/auth/notion/url`
+  * `GET  /api/auth/notion/callback` – stores encrypted `access_token`.
+
+• **Server-side Notion proxy** – `POST /proxy/notion` (alias `/api/proxy/notion`).
+  Allows front-end to hit any Notion REST path CORS-free; server adds `Authorization` & `Notion-Version` headers.
+
+• **Expanded Notion commands** – `pages`, `list-pages`, `get-page`, `create-page`, `update-page`.
+
+• **Unified Google scopes** – Calendar, Drive, Gmail now share one consent; `/google/refresh` returns `{ access_token, expires_in }`.
+
+• **Error envelope** – every route now returns `{ ok:false, code, message }` on failure.
+
+### Front-End impact
+• Replace direct Notion REST calls with `fetch('/proxy/notion', …)`.
+• "Connect Jira/Notion" buttons just open the URL from `/api/auth/<provider>/url` and wait for `status` endpoint to flip.
+
 ## Changelog – 2025-06-21
 
 ### Backend
