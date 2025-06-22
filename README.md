@@ -1,4 +1,4 @@
-# Slash / MCP Server – Technical Product Requirements Document (PRD)
+# MCP Messenger -Server – Technical Product Requirements Document (PRD)
 
 ## 🚀 Installation & Quick-Start (Local Dev)
 
