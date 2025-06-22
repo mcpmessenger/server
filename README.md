@@ -456,3 +456,48 @@ The server converts both requests into calls to Zapier's NLA endpoints:
 All responses (including errors) are returned as JSON, making them safe to consume from the front-end or other automations.
 
 ---
+
+## Jira Integration (OAuth 2.0 3-LO)
+
+The MCP Server now supports Atlassian Jira Cloud commands out-of-the-box.
+
+### Supported slash commands
+
+| UI slash                                           | Prompt slug      | Description                       |
+|----------------------------------------------------|------------------|-----------------------------------|
+| `/jira list projects`                              | `list-projects`  | List accessible Jira projects      |
+| `/jira list issues`                                | `list-issues`    | Recent issues (default *assigned*) |
+| `/jira get issue ABC-123`                          | `get-issue ABC-123` | Full issue JSON                   |
+| `/jira create issue KEY "Summary"`                | `create-issue KEY "Summary"` | Create new issue   |
+| `/jira update issue ABC-123  …`                    | `update-issue ABC-123 …` | Update fields (JSON body)        |
+| `/jira add comment ABC-123 "…"`                   | `add-comment ABC-123 "…"` | Append comment & return id       |
+| `/jira transition issue ABC-123 Done`              | `transition-issue ABC-123 Done` | Move issue to status        |
+
+### Backend env-vars ( `project/backend/.env` )
+
+```
+PORT=3001                         # keep 3001 for Google + Jira in dev
+ATLASSIAN_CLIENT_ID=<app id>
+ATLASSIAN_CLIENT_SECRET=<secret>  # if confidential mode enabled
+JIRA_REDIRECT_URI=http://localhost:3001/api/auth/jira/callback
+JIRA_SCOPES=read:jira-work write:jira-work offline_access
+CORS_ORIGINS=http://localhost:5174,http://localhost:5173
+```
+
+### Atlassian developer-console set-up
+1. OAuth 2.0 (3-LO) app → Authorisation → **Redirect URIs** → add the value of `JIRA_REDIRECT_URI`.
+2. Copy the **Client ID** + **Secret** into `.env`.
+3. Grant the scopes shown above (or a subset) and *Save*.
+
+### Supabase row
+Update the `mcp_servers` table so Jira points at the correct port in dev:
+
+```sql
+update mcp_servers
+set    apiurl = 'http://localhost:3001'
+where  id = 'jira';
+```
+
+(Production deployments should point to the public MCP Server URL.)
+
+After these steps "Connect Jira" in the Integrations portal opens the Atlassian consent screen; once accepted the badge flips to **Connected** and slash commands work via the MCP protocol.

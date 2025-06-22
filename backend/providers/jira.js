@@ -1,7 +1,15 @@
 import axios from 'axios';
 
 export const id = 'jira';
-export const supportedCommands = ['list-projects', 'create-issue'];
+export const supportedCommands = [
+  'list-projects',
+  'list-issues',
+  'get-issue',
+  'create-issue',
+  'update-issue',
+  'add-comment',
+  'transition-issue'
+];
 
 export async function executeCommand({ command, params = {}, credentials = {} }) {
   // Support two auth styles:
@@ -55,6 +63,47 @@ export async function executeCommand({ command, params = {}, credentials = {} })
       };
       const { data } = await client.post('/issue', body);
       return { output: `✅ Issue ${data.key} created` };
+    }
+    case 'list-issues': {
+      // Optional JQL param; default to assigned to me
+      const { jql } = params;
+      const { data } = await client.get('/search', {
+        params: {
+          jql: jql || 'assignee = currentUser() ORDER BY updated DESC',
+          maxResults: 20,
+          fields: 'key,summary,status'
+        }
+      });
+      const lines = (data.issues || []).map(i => `${i.key} | ${i.fields.summary} (${i.fields.status?.name})`).join('\n');
+      return { output: lines || 'No issues found' };
+    }
+    case 'get-issue': {
+      const { issueKey } = params;
+      if (!issueKey) throw new Error('issueKey required');
+      const { data } = await client.get(`/issue/${issueKey}`);
+      return { output: JSON.stringify(data, null, 2) };
+    }
+    case 'update-issue': {
+      const { issueKey, fields = {} } = params;
+      if (!issueKey || !Object.keys(fields).length) throw new Error('issueKey and fields required');
+      await client.put(`/issue/${issueKey}`, { fields });
+      return { output: `✅ Issue ${issueKey} updated` };
+    }
+    case 'add-comment': {
+      const { issueKey, body } = params;
+      if (!issueKey || !body) throw new Error('issueKey and body required');
+      const { data } = await client.post(`/issue/${issueKey}/comment`, { body });
+      return { output: `💬 Comment ${data.id} added` };
+    }
+    case 'transition-issue': {
+      const { issueKey, transitionName } = params;
+      if (!issueKey || !transitionName) throw new Error('issueKey and transitionName required');
+      // Get available transitions first to map name -> id
+      const { data: txData } = await client.get(`/issue/${issueKey}/transitions`);
+      const tx = (txData.transitions || []).find(t => t.name.toLowerCase() === transitionName.toLowerCase());
+      if (!tx) throw new Error(`Transition '${transitionName}' not found`);
+      await client.post(`/issue/${issueKey}/transitions`, { transition: { id: tx.id } });
+      return { output: `🔀 Issue ${issueKey} transitioned to ${transitionName}` };
     }
     default:
       throw new Error(`Unsupported Jira command: ${command}`);

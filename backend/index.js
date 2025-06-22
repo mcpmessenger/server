@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
+import path from 'path';
 import OpenAI from 'openai';
 import { Anthropic } from '@anthropic-ai/sdk';
 import { GoogleGenerativeAI } from '@google/generative-ai';
@@ -25,7 +26,11 @@ import jiraProvider from './providers/jira.js';
 import notionProvider from './providers/notion.js';
 import axios from 'axios';
 
+// Load env vars – first from current dir, then parent as fallback
 dotenv.config();
+if (!process.env.ATLASSIAN_CLIENT_ID) {
+  dotenv.config({ path: path.resolve(process.cwd(), '../.env') });
+}
 
 const app = express();
 app.use(cors({
@@ -99,6 +104,20 @@ function generateCodeChallenge(verifier) {
   return base64urlEncode(sha256(Buffer.from(verifier)));
 }
 
+// ── Jira alias routes (rewrite, no redirect) ─────────
+app.get('/api/jira/url', (req, res, next) => {
+  req.url = '/api/auth/jira/url';
+  next();
+});
+app.get('/api/jira/status', (req, res, next) => {
+  req.url = '/api/auth/jira/status';
+  next();
+});
+app.post('/api/jira/disconnect', (req, res, next) => {
+  req.url = '/api/auth/jira/disconnect';
+  next();
+});
+
 // ─── Jira OAuth endpoints ────────────────────────────────
 app.get('/api/auth/jira/url', (req, res) => {
   if (!ATLASSIAN_CLIENT_ID) return res.status(500).json({ error: 'Missing ATLASSIAN_CLIENT_ID' });
@@ -117,7 +136,30 @@ app.get('/api/auth/jira/url', (req, res) => {
     code_challenge_method: 'S256',
     prompt: 'consent'
   });
-  res.json({ url: `https://auth.atlassian.com/authorize?${params.toString()}` });
+  const authorizationUrl = `https://auth.atlassian.com/authorize?${params.toString()}`;
+  // Return both for backward-compat but prefer authorizationUrl
+  return res.json({ authorizationUrl, url: authorizationUrl });
+});
+
+// Live-status helper (auth namespace for UI convenience)
+app.get('/api/auth/jira/status', async (req, res) => {
+  try {
+    const creds = await daoGetCredentials('jira');
+    res.json({ connected: !!creds });
+  } catch (err) {
+    res.status(500).json({ connected: false, error: err.message });
+  }
+});
+
+// Disconnect – removes stored Jira tokens
+app.post('/api/auth/jira/disconnect', async (req, res) => {
+  try {
+    await daoDeleteCredentials('jira');
+    broadcastEvent('token-disconnect', { provider: 'jira' });
+    res.json({ disconnected: true });
+  } catch (err) {
+    res.status(500).json({ disconnected: false, error: err.message });
+  }
 });
 
 app.get('/api/auth/jira/callback', async (req, res) => {
@@ -130,13 +172,17 @@ app.get('/api/auth/jira/callback', async (req, res) => {
     const { codeVerifier } = req.session.jiraOauth;
     delete req.session.jiraOauth;
     // Exchange code → tokens
-    const tokenResp = await axios.post('https://auth.atlassian.com/oauth/token', {
+    const tokenBody = {
       grant_type: 'authorization_code',
       client_id: ATLASSIAN_CLIENT_ID,
       code,
       redirect_uri: JIRA_REDIRECT_URI,
       code_verifier: codeVerifier
-    }, { headers: { 'Content-Type': 'application/json' } });
+    };
+    if (process.env.ATLASSIAN_CLIENT_SECRET) {
+      tokenBody.client_secret = process.env.ATLASSIAN_CLIENT_SECRET;
+    }
+    const tokenResp = await axios.post('https://auth.atlassian.com/oauth/token', tokenBody, { headers: { 'Content-Type': 'application/json' } });
 
     const { access_token, refresh_token, expires_in, scope } = tokenResp.data;
     // Determine cloudId
@@ -153,10 +199,15 @@ app.get('/api/auth/jira/callback', async (req, res) => {
       cloud_id: cloudId
     }));
     broadcastEvent('token-connect', { provider: 'jira' });
-    const redirect = (process.env.CORS_ORIGINS || 'http://localhost:5173').split(',')[0] + '/integrations?provider=jira&status=success';
+    const frontendBase = (process.env.CORS_ORIGINS || 'http://localhost:5173').split(',')[0];
+    const redirect = `${frontendBase}/?provider=jira&status=success`;
     return res.redirect(302, redirect);
   } catch (err) {
-    console.error('[Jira OAuth] callback', err.message);
+    if (err.response) {
+      console.error('[Jira OAuth] callback', err.response.status, err.response.data || err.response.statusText);
+    } else {
+      console.error('[Jira OAuth] callback', err.message);
+    }
     res.status(500).send('Jira OAuth failed');
   }
 });
@@ -1503,9 +1554,7 @@ app.post('/api/validate/webhook', express.json(), async (req, res) => {
 });
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok' });
-});
+app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // NEW: plain "/health" alias for convenience and spec compatibility
 app.get('/health', (req, res) => {
@@ -1945,9 +1994,14 @@ app.get('/api/:provider/status', async (req, res) => {
       const creds = await daoGetCredentials('google');
       return res.json({ connected: !!creds?.refreshToken });
     }
-    if (providerId === 'github' || providerId === 'slack' || providerId === 'notion' || providerId === 'jira') {
+    if (providerId === 'github' || providerId === 'slack' || providerId === 'notion') {
       const creds = await daoGetCredentials(providerId);
       return res.json({ connected: !!creds?.token || !!creds?.apiKey });
+    }
+    // ─── Jira status ─────────────────────────────────────────────
+    if (providerId === 'jira') {
+      const creds = await daoGetCredentials('jira');
+      return res.json({ connected: !!creds });
     }
     // default: check any credentials blob
     const creds = await daoGetCredentials(providerId);
@@ -2120,6 +2174,47 @@ app.post(['/proxy/notion','/api/proxy/notion'], express.json({ limit: '10mb' }),
   } catch (err) {
     console.error('[Proxy/Notion] error', err);
     res.status(500).json({ ok:false, code:'SERVER', message:err.message });
+  }
+});
+
+// --- Jira proxy to bypass CORS (server-side pass-through) ---
+const JIRA_API_BASE = 'https://api.atlassian.com/ex/jira';
+
+app.post(['/proxy/jira','/api/proxy/jira'], express.json({ limit: '10mb' }), async (req, res) => {
+  try {
+    const { path = '', method = 'GET', body = null, accessToken, cloudId } = req.body || {};
+    if (!path) return res.status(400).json({ ok:false, code:'VALIDATION', message:'Missing "path" body param' });
+
+    // Resolve Jira access token & cloudId
+    let token = accessToken;
+    let cId = cloudId;
+    if (!token || !cId) {
+      const auth = await ensureJiraAccessToken();
+      if (!auth) return res.status(401).json({ ok:false, code:'AUTH_REQUIRED', message:'Jira integration not connected' });
+      token = auth.accessToken;
+      cId = auth.cloudId;
+    }
+
+    const upstreamUrl = `${JIRA_API_BASE}/${cId}/rest/api/3/${path.replace(/^\/+/,'')}`;
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    };
+
+    const upstreamResp = await fetch(upstreamUrl, {
+      method: method.toUpperCase(),
+      headers,
+      body: method.toUpperCase() === 'GET' ? undefined : JSON.stringify(body || {})
+    });
+
+    const isJson = upstreamResp.headers.get('content-type')?.includes('application/json');
+    const payload = isJson ? await upstreamResp.json().catch(async () => ({ raw: await upstreamResp.text() })) : await upstreamResp.text();
+
+    res.status(upstreamResp.status).json(payload);
+  } catch (err) {
+    console.error('[Proxy/Jira] error', err);
+    res.status(500).json({ ok:false, code:'SERVER', message: err.message });
   }
 });
 
