@@ -48,7 +48,7 @@ app.use(express.urlencoded({ limit: '10mb', extended: true }));
 
 // Session setup
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'mcp-secret',
+  secret: process.env.SESSION_SECRET || 'mcpmessenger-secret',
   resave: false,
   saveUninitialized: false,
   cookie: {
@@ -1765,7 +1765,7 @@ app.post('/mcp', async (req, res) => {
       return sendResult({
         protocolVersion: version,
         serverInfo: {
-          name: 'mcpserver',
+          name: 'MCP Messenger -Server',
           version: '0.1.0'
         },
         capabilities: {

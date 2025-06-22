@@ -1,5 +1,5 @@
 {
-  "name": "mcp-backend",
+  "name": "mcpmessenger-server",
   "version": "1.0.0",
   "main": "index.js",
   "type": "module",
@@ -11,6 +11,7 @@
     "@google/generative-ai": "^0.5.0",
     "@notionhq/client": "^2.3.0",
     "@slack/web-api": "^7.9.3",
+    "@supabase/supabase-js": "^2.42.0",
     "axios": "^1.10.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -20,7 +21,7 @@
     "openai": "^4.30.0",
     "sqlite": "^5.1.1",
     "sqlite3": "^5.1.7",
-    "@supabase/supabase-js": "^2.42.0"
+    "vite-react-typescript-starter": "file:.."
   },
   "devDependencies": {
     "jest": "^30.0.0",
