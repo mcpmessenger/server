@@ -1,166 +1,69 @@
 # Slash / MCP Server – Technical Product Requirements Document (PRD)
 
-## Changelog – 2024-06-18
+## 🚀 Installation & Quick-Start (Local Dev)
 
-### Backend
-- AES-256-GCM encryption for stored tokens & PATs (`encryptValue` / `decryptValue`).
-- Central token manager: auto-refresh for Gmail, Drive, Calendar.
-- Expanded Google OAuth scopes: `drive.file`, `gmail.readonly`, `gmail.send`, `calendar`.
-- CORS allow-list driven by `CORS_ORIGINS` env var.
-- Health & status endpoints (`/health`, `/api/google/status`, `/api/github/status`).
-- Provider list trimmed to core AI + GitHub in settings.
+### Prerequisites
+- **Node.js ≥ 20** and **npm ≥ 9** (or pnpm/yarn)
+- **Git** (to clone the repo) – or download the full source zip including `backend/`, `src/`, `services/`, `providers/` folders.
 
-### Front-End
-- Settings modal now shows **only** OpenAI, Anthropic, Gemini, and GitHub.
-- SmartChat starts minimized by default; header toggle restores it.
-- Google Calendar card removed (shares OAuth behind the scenes).
+### 1 – Clone & install
+```bash
+# grab the code
+git clone https://github.com/your-org/mcp-server.git
+cd mcp-server/project
 
-### Dev Notes
-1. After pulling:
-   ```bash
-   pnpm install # or npm i
-   npm run dev  # front-end
-   node backend/index.js # backend
-   ```
-2. Set environment:
-   ```env
-   ENCRYPTION_KEY=super-long-random-secret
-   CORS_ORIGINS=http://localhost:5173
-   GOOGLE_CLIENT_ID=...
-   GOOGLE_CLIENT_SECRET=...
-   ```
-3. If testing Google locally, add `http://localhost:3001/auth/google/callback` to OAuth client redirect URIs and enable Drive, Gmail, Calendar APIs.
+# install front-end + workspace deps (root package.json)
+npm install
 
-## Changelog – 2025-06-20
+# install backend-specific deps	npm install --prefix backend
+```
 
-### Backend
-- Added **modular provider plugins** for **Slack**, **Jira**, **Notion**, **Loveable**, **Bolt**, and **21st.dev** (UI component generator).
-- Introduced **Credential DAO** (`backend/services/credentialDao.js`) with Supabase support and local SQLite fallback for per-user provider credentials.
-- New **/api/providers** and **/api/providers/:providerId/resources** endpoints expose provider metadata and resource discovery (MCP extension).
-- Slack commands: `send-message`, `list-channels`, `get-channel-history`.
-- Jira commands: `list-projects`, `create-issue`.
-- Notion commands: `list-databases`, `query-database`.
-- Enhanced Google token refresh flow now persists refresh tokens via Credential DAO and AES-256-GCM encryption.
-- Minor: constant `MCP_SERVER_VERSION` added (`2024-07-01`).
+### 2 – Configure environment
+Copy `.env.example` → `.env` and fill in at least the values marked **(required)**:
+```bash
+cp env.example .env
+```
+Key vars for a first run:
+```env
+# ─── Front-end (Vite) ───────────
+VITE_SUPABASE_URL=stub
+VITE_SUPABASE_ANON_KEY=stub
 
-### Front-End (admin UI)
-- No visual changes yet – new providers appear dynamically once API keys are supplied.
+# ─── Back-end (Express) ────────
+OPENAI_API_KEY=your-key-here           # optional if you just explore the UI
+CORS_ORIGINS=http://localhost:5173     # allow Vite dev server
+SESSION_SECRET=dev-secret
+ENCRYPTION_KEY=$(openssl rand -hex 32) # 64-char hex
+```
 
-### Dev Notes
-1. New env vars (backend):
-   ```env
-   SUPABASE_URL=<your supabase url>
-   SUPABASE_SERVICE_ROLE_KEY=<service role key>
-   SLACK_BOT_TOKEN=xoxb-...
-   JIRA_HOST=<your-domain.atlassian.net>
-   JIRA_EMAIL=<jira account email>
-   JIRA_API_TOKEN=<jira api token>
-   NOTION_TOKEN=<secret_...>
-   ```
-2. Run `npm install` inside `backend/` to pull new dependencies: `@slack/web-api`, `@supabase/supabase-js`, `@notionhq/client`, `axios`.
+### 3 – Run dev servers (two tabs)
+```bash
+# tab 1 – front-end (Vite + React)
+npm run dev              # or pnpm run dev
 
-## Changelog – 2025-06-22
+# tab 2 – back-end (Express)
+npm run dev:backend      # = cd backend && npm start
+```
+Visit http://localhost:5173 – the admin UI talks to the backend on port 3001.
 
-### Backend
-• **Jira Cloud OAuth (PKCE)** – endpoints
-  * `GET  /api/auth/jira/url` → returns the Atlassian authorize URL (code challenge stored in session).
-  * `GET  /api/auth/jira/callback` → exchanges code → access/refresh, discovers `cloudId`, encrypts & saves tokens.
-  * Helper `ensureJiraAccessToken()` auto-refreshes and injects Bearer tokens for all Jira commands.
+>  Tip: `npm run dev:all` starts both processes concurrently.
 
-• **Notion OAuth (3-LO)** – endpoints
-  * `GET  /api/auth/notion/url`
-  * `GET  /api/auth/notion/callback` – stores encrypted `access_token`.
+### 4 – Build for production
+```bash
+npm run build      # front-end → dist/
+# serve dist/ with any static server & keep backend running with pm2/systemd
+```
 
-• **Server-side Notion proxy** – `POST /proxy/notion` (alias `/api/proxy/notion`).
-  Allows front-end to hit any Notion REST path CORS-free; server adds `Authorization` & `Notion-Version` headers.
-
-• **Expanded Notion commands** – `pages`, `list-pages`, `get-page`, `create-page`, `update-page`.
-
-• **Unified Google scopes** – Calendar, Drive, Gmail now share one consent; `/google/refresh` returns `{ access_token, expires_in }`.
-
-• **Error envelope** – every route now returns `{ ok:false, code, message }` on failure.
-
-### Front-End impact
-• Replace direct Notion REST calls with `fetch('/proxy/notion', …)`.
-• "Connect Jira/Notion" buttons just open the URL from `/api/auth/<provider>/url` and wait for `status` endpoint to flip.
-
-## Changelog – 2025-06-21
-
-### Backend
-- **Anthropic v1/messages support** – automatically detects new `sk-ant-api03-…` keys and uses `x-api-key` header + `/v1/messages` endpoint; legacy keys continue to work.
-- Generic `/api/credentials/:providerId` route now encrypts **all** string fields with AES-256-GCM, matching GitHub/Slack behaviour.
-- Added `/api/health` route to exported POST list; header badge polls this every 5 s.
-
-### Front-End
-- New `useProviders` hook subscribes to Supabase Realtime on `user_integration_accounts`; provider badges flip live across tabs/devices.
-- Settings modal now saves credentials via the encrypted credentials endpoint; localStorage removed.
-- Added **Vite dev proxy** recommendation (see Dev Notes) so FE ↔ BE share the same origin in dev & prod and CORS is eliminated.
-
-### Dev Notes
-1. **Run the whole stack**
-   ```bash
-   # project root
-   npm install        # pulls @supabase/supabase-js + concurrently
-   npm run dev:all    # Vite on 5174 + backend on 3002 (via `dev:backend`)
-   ```
-2. **Vite proxy (add to `vite.config.ts`)**
-   ```ts
-   server: {
-     proxy: {
-       '/api': 'http://localhost:3002',
-       '/mcp': 'http://localhost:3002',
-     }
-   }
-   ```
-3. **Environment (.env)**
-   ```env
-   # front-end
-   VITE_SUPABASE_URL=…
-   VITE_SUPABASE_ANON_KEY=…
-
-   # back-end
-   PORT=3002
-   CORS_ORIGINS=http://localhost:5173,http://localhost:5174,http://localhost:5175
-   ENCRYPTION_KEY=<64-char hex>
-   SUPABASE_URL=…
-   SUPABASE_SERVICE_ROLE_KEY=…
-   ```
-4. **Supabase DB** – table `public.user_integration_accounts` with PK `(user_id,provider)` and RLS policy `upsert_own_credentials` must be enabled; realtime publication on this table must stay ON.
-
----
-
-## Quick Command Cheat-Sheet  
-Natural-language phrases that MCP's Smart Chat can understand today. Use the words **then**, **and**, **and then**, a period, or a semicolon to chain steps—the parser will split them automatically.
-
-### Single-step Examples
-- "Summarize this article"
-- "Translate the above summary to French"
-- "Explain this code snippet"
-- "Generate a unit test for this function"
-- "List my last 5 GitHub repos"
-- "Get README.md from sentilabs01/alexa"
-- "Send email to john@example.com — Subject: Hello — Body: Here's the weekly report"
-- "List Google Drive files in folder Docs"
-
-### Multi-step / Chained Examples
-- "List my last 2 GitHub repos then summarize the most active one"
-- "Get README of sentilabs01/alexa; summarize it; generate an issue titled 'Documentation improvements' in the same repo"
-- "Fetch today's Gmail inbox, summarize messages, and translate the summary to Spanish"
-- "List files in Google Drive folder Docs and summarize each one"
-- "Extract text from the attached image then run sentiment analysis"
-- "Summarize this PDF and email the summary to my team"
-- "Translate the attached CSV to Japanese and upload it back to Google Drive"
-- "List AI-enabled Zaps and trigger Zap 12345"
-- "Run code search for 'useEffect cleanup' in sentilabs01/alexa then summarize the findings"
-
-These are simply **suggestions**—the intent parser is purposefully lenient, so feel free to phrase commands naturally. If a step maps to an integration (GitHub, Gmail, Google Drive, Zapier, etc.) MCP routes it automatically; otherwise it treats it as an AI prompt.
-
----
+## 🌟 Why use MCP Messenger Server?
+1. **Unified AI layer** – OpenAI, Anthropic, Gemini & more via one `/api/chat` contract.
+2. **Plug-in providers** – GitHub, Gmail, Slack, Jira, Notion, Drive… drop-in JS modules under `backend/providers/`.
+3. **Secure credential vault** – AES-256-GCM encryption + SQLite/Supabase DAO.
+4. **Chained workflows** – Parse natural language into multi-step provider commands.
+5. **Batteries included UI** – React admin panel for keys, OAuth connects, request history.
+6. **Dev-friendly** – Vite hot-reload, CORS allow-list via `CORS_ORIGINS`.
 
 ## 1. Vision
 A unified backend service for the Model Context Protocol (MCP), enabling API-driven, multi-provider AI and automation command execution, workflow chaining, and seamless integration with services like GitHub and Google. MCP Server acts as the core engine for orchestrating commands and workflows across apps and protocols.
-
----
 
 ## 2. Tech Stack
 
@@ -176,8 +79,6 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - React 18 (TypeScript), Vite, Tailwind CSS (dark mode)
 - Custom UI components, lucide-react icons
 - State management with custom React hooks
-
----
 
 ## 3. Core Features
 
@@ -199,8 +100,6 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - Provider status indicators (connected/disconnected, last used, request count)
 - Modern, responsive UI with dark/light mode
 
----
-
 ## 4. User Workflows
 
 - **Multi-provider AI chat:** Apps or users can send chat, summarize, or code commands to OpenAI, Anthropic, or Gemini using their own API keys.
@@ -212,8 +111,6 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - **File upload:** Summarize or process uploaded files.
 - **Session-based authentication:** Secure, per-user integration tokens.
 
----
-
 ## 5. Security & Best Practices
 
 - TypeScript everywhere
@@ -223,8 +120,6 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - API error handling and user feedback
 - CORS restricted to local dev ports
 - Per-user token storage in SQLite
-
----
 
 ## 6. Roadmap & Next Steps
 
@@ -237,15 +132,11 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - Add unit and integration tests
 - Finalise Bolt & 21st.dev integrations; add UI for new providers
 
----
-
 ## 7. Example Use Cases
 
 - "Summarize this PDF and then translate it to Spanish."
 - "Fetch the latest GitHub issues, summarize them, and email the summary to my team."
 - "Extract text from an image, then run sentiment analysis."
-
----
 
 # Slash / MCP Server
 
@@ -269,8 +160,6 @@ A unified backend service for the Model Context Protocol (MCP), enabling API-dri
 - Custom command macros and user-defined workflows.
 - Scheduling and automation.
 - Contextual memory and chaining across sessions.
-
----
 
 ## Features
 
