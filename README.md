@@ -10,7 +10,7 @@
 ```bash
 # grab the code
 git clone https://github.com/your-org/mcp-server.git
-cd mcp-server/project
+cd server
 
 # install front-end + workspace deps (root package.json)
 npm install
